@@ -13,14 +13,18 @@ Supported filesystem backends:
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
+import pty as pty_mod
 import select
 import shlex
 import shutil
 import subprocess
+import termios
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -50,6 +54,11 @@ class SandboxConfig:
         cpu_max: cgroup v2 ``cpu.max`` value (e.g. ``"50000 100000"``).
         memory_max: cgroup v2 ``memory.max`` value in bytes.
         pids_max: cgroup v2 ``pids.max`` value.
+        tty: Use a pseudo-terminal instead of pipes for command I/O.
+            Enables ``write_stdin()`` for interactive programs.  Default
+            ``False`` preserves the fast pipe-based path.
+        net_isolate: Create a separate network namespace (loopback only).
+            Default ``False`` inherits the host network.
     """
 
     image: str = ""
@@ -62,6 +71,8 @@ class SandboxConfig:
     cpu_max: Optional[str] = None
     memory_max: Optional[str] = None
     pids_max: Optional[str] = None
+    tty: bool = False
+    net_isolate: bool = False
 
 
 # ====================================================================== #
@@ -91,13 +102,18 @@ class _PersistentShell:
         env: dict[str, str],
         working_dir: str = "/",
         cgroup_path: Optional[Path] = None,
+        tty: bool = False,
+        net_isolate: bool = False,
     ):
         self._rootfs = rootfs
         self._shell = shell
         self._env = env
         self._working_dir = working_dir
         self._cgroup_path = cgroup_path
+        self._tty = tty
+        self._net_isolate = net_isolate
         self._process: Optional[subprocess.Popen] = None
+        self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
         self._signal_r: Optional[int] = None
         self._signal_w: Optional[int] = None
@@ -115,15 +131,10 @@ class _PersistentShell:
         signal_r, signal_w = os.pipe()
         self._signal_r = signal_r
 
-        cmd: list[str] = [
-            "unshare",
-            "--pid",
-            "--mount",
-            "--fork",
-            "chroot",
-            str(self._rootfs),
-            self._shell,
-        ]
+        cmd: list[str] = ["unshare", "--pid", "--mount"]
+        if self._net_isolate:
+            cmd.append("--net")
+        cmd.extend(["--fork", "chroot", str(self._rootfs), self._shell])
         if "bash" in self._shell:
             cmd.extend(["--norc", "--noprofile"])
 
@@ -140,16 +151,36 @@ class _PersistentShell:
 
             preexec_fn = _add_to_cgroup
 
-        self._process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=self._env,
-            bufsize=0,
-            preexec_fn=preexec_fn,
-            pass_fds=(signal_w,),
-        )
+        if self._tty:
+            master_fd, slave_fd = pty_mod.openpty()
+            # Disable echo so input doesn't pollute output.
+            attrs = termios.tcgetattr(master_fd)
+            attrs[3] &= ~termios.ECHO  # lflags
+            termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
+
+            self._process = subprocess.Popen(
+                cmd,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=self._env,
+                bufsize=0,
+                preexec_fn=preexec_fn,
+                pass_fds=(signal_w,),
+            )
+            os.close(slave_fd)
+            self._master_fd = master_fd
+        else:
+            self._process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=self._env,
+                bufsize=0,
+                preexec_fn=preexec_fn,
+                pass_fds=(signal_w,),
+            )
 
         # Close write end in parent -- only the child should write to it.
         os.close(signal_w)
@@ -161,8 +192,7 @@ class _PersistentShell:
             f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
             f"echo 0 >&3\n"
         )
-        self._process.stdin.write(init_script.encode())
-        self._process.stdin.flush()
+        self._write_input(init_script.encode())
 
         # Wait for the init signal.
         ec_str = self._read_signal(timeout=10)
@@ -172,10 +202,13 @@ class _PersistentShell:
                 f"(rootfs={self._rootfs}, shell={self._shell})"
             )
 
+        ns_flags = "pid,mount" + (",net" if self._net_isolate else "")
         logger.debug(
-            "Persistent shell started: pid=%d rootfs=%s ns=[pid,mount]",
+            "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
             self._process.pid,
             self._rootfs,
+            ns_flags,
+            self._tty,
         )
 
     def kill(self) -> None:
@@ -187,6 +220,12 @@ class _PersistentShell:
             except Exception:
                 pass
             self._process = None
+        if self._master_fd is not None:
+            try:
+                os.close(self._master_fd)
+            except OSError:
+                pass
+            self._master_fd = None
         if self._signal_r is not None:
             try:
                 os.close(self._signal_r)
@@ -226,10 +265,7 @@ class _PersistentShell:
                 f"echo $? >&3\n"
             )
 
-            try:
-                self._process.stdin.write(script.encode())
-                self._process.stdin.flush()
-            except (BrokenPipeError, OSError):
+            if not self._write_input(script.encode()):
                 return "Shell pipe broken", -1
 
             output, exit_code = self._read_until_signal(timeout=timeout)
@@ -246,7 +282,41 @@ class _PersistentShell:
 
             return output, exit_code
 
+    def write_stdin(self, data: str | bytes) -> None:
+        """Write raw data to the shell's stdin.
+
+        Only works in PTY mode (``tty=True``).  Use this to send input
+        to interactive programs running inside the sandbox.
+        """
+        if not self._tty:
+            raise RuntimeError("write_stdin() requires tty=True")
+        if isinstance(data, str):
+            data = data.encode()
+        with self._lock:
+            self._write_input(data)
+
     # -- internal I/O ------------------------------------------------------ #
+
+    def _write_input(self, data: bytes) -> bool:
+        """Write to the shell's stdin (PTY master or pipe)."""
+        try:
+            if self._tty and self._master_fd is not None:
+                os.write(self._master_fd, data)
+            elif self._process and self._process.stdin:
+                self._process.stdin.write(data)
+                self._process.stdin.flush()
+            else:
+                return False
+        except (BrokenPipeError, OSError):
+            return False
+        return True
+
+    @property
+    def _stdout_fd(self) -> int:
+        """File descriptor to read command output from."""
+        if self._tty and self._master_fd is not None:
+            return self._master_fd
+        return self._process.stdout.fileno()
 
     def _read_signal(self, timeout: Optional[float] = None) -> Optional[str]:
         """Read a single line from the signal fd."""
@@ -274,7 +344,7 @@ class _PersistentShell:
             ``(None, -2)`` on timeout.
         """
         deadline = time.monotonic() + timeout if timeout else None
-        stdout_fd = self._process.stdout.fileno()
+        stdout_fd = self._stdout_fd
         signal_fd = self._signal_r
         buf = b""
         parts: list[str] = []
@@ -299,7 +369,11 @@ class _PersistentShell:
             if stdout_fd in ready:
                 try:
                     chunk = os.read(stdout_fd, 65536)
-                except OSError:
+                except OSError as e:
+                    # PTY raises EIO when slave side closes — not an error,
+                    # just means the child is gone.
+                    if e.errno == errno.EIO:
+                        break
                     return None, -1
                 if not chunk:
                     return None, -1
@@ -335,7 +409,7 @@ class _PersistentShell:
                     try:
                         chunk = os.read(stdout_fd, 65536)
                     except OSError:
-                        break
+                        break  # EIO from PTY or pipe closed
                     if not chunk:
                         break
                     buf += chunk
@@ -350,6 +424,11 @@ class _PersistentShell:
                 if buf:
                     parts.append(buf.decode("utf-8", errors="backslashreplace"))
                 return None, -1
+
+        # Reached via break (e.g. PTY EIO) — return whatever we have.
+        if buf:
+            parts.append(buf.decode("utf-8", errors="backslashreplace"))
+        return "".join(parts) if parts else None, exit_code if exit_code is not None else -1
 
 
 # ====================================================================== #
@@ -455,8 +534,12 @@ class Sandbox:
             env=self._cached_env,
             working_dir=config.working_dir or "/",
             cgroup_path=self._cgroup_path,
+            tty=config.tty,
+            net_isolate=config.net_isolate,
         )
         shell_ms = (time.monotonic() - t3) * 1000
+
+        self._bg_handles: dict[str, str] = {}  # handle -> pid
 
         logger.info(
             "Sandbox ready: name=%s rootfs=%s fs=%s "
@@ -498,11 +581,80 @@ class Sandbox:
         logger.debug("cmd (%.1fms exit=%d): %.200s", elapsed_ms, exit_code, cmd_str)
         return output, exit_code
 
+    def write_stdin(self, data: str | bytes) -> None:
+        """Write raw data to the sandbox shell's stdin (PTY mode only).
+
+        Use this to send input to interactive programs.  Requires
+        ``SandboxConfig(tty=True)``.
+
+        Example::
+
+            sb.run("cat")         # blocks waiting for stdin
+            sb.write_stdin("hello\\n")
+        """
+        self._persistent_shell.write_stdin(data)
+
+    # -- background processes ---------------------------------------------- #
+
+    def run_background(self, command: str | list[str]) -> str:
+        """Start a command in the background inside the sandbox.
+
+        Returns a handle string to use with :meth:`check_background` and
+        :meth:`stop_background`.  The command runs asynchronously; the
+        persistent shell remains available for ``run()`` calls.
+
+        Example::
+
+            handle = sb.run_background("python -m http.server 8080")
+            time.sleep(1)
+            output, running = sb.check_background(handle)
+        """
+        if isinstance(command, list):
+            command = shlex.join(command)
+        handle = uuid.uuid4().hex[:8]
+        out_file = f"/tmp/.bg_{handle}.out"
+        pid_file = f"/tmp/.bg_{handle}.pid"
+        self.run(
+            f"nohup bash -c {shlex.quote(command)} > {out_file} 2>&1 & echo $! > {pid_file}"
+        )
+        pid_str, _ = self.run(f"cat {pid_file} 2>/dev/null")
+        self._bg_handles[handle] = pid_str.strip()
+        return handle
+
+    def check_background(self, handle: str) -> tuple[str, bool]:
+        """Check a background process started with :meth:`run_background`.
+
+        Returns ``(output_so_far, is_running)`` tuple.
+        """
+        out_file = f"/tmp/.bg_{handle}.out"
+        pid = self._bg_handles.get(handle, "")
+        output, _ = self.run(f"cat {out_file} 2>/dev/null")
+        if pid:
+            _, ec = self.run(f"kill -0 {pid} 2>/dev/null")
+            running = ec == 0
+        else:
+            running = False
+        return output, running
+
+    def stop_background(self, handle: str) -> str:
+        """Stop a background process and return its final output."""
+        out_file = f"/tmp/.bg_{handle}.out"
+        pid_file = f"/tmp/.bg_{handle}.pid"
+        pid = self._bg_handles.pop(handle, "")
+        if pid:
+            self.run(f"kill {pid} 2>/dev/null; kill -9 {pid} 2>/dev/null")
+        output, _ = self.run(f"cat {out_file} 2>/dev/null")
+        self.run(f"rm -f {out_file} {pid_file}")
+        return output
+
+    # -- reset / delete ---------------------------------------------------- #
+
     def reset(self) -> None:
         """Reset the sandbox filesystem to its initial state.
 
         This is the RL fast-path: ~27ms for overlayfs, ~28ms for btrfs.
         """
+        self._bg_handles.clear()
         t0 = time.monotonic()
 
         self._persistent_shell.kill()
