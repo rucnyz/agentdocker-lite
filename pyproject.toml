@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentdocker-lite"
-version = "0.1.0"
+version = "0.0.1"
 description = "Lightweight Linux namespace sandbox with persistent shell and instant reset"
 requires-python = ">=3.10"
 license = "MIT"
