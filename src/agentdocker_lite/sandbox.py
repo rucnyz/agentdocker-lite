@@ -649,6 +649,76 @@ class Sandbox:
         self.run(f"rm -f {out_file} {pid_file}")
         return output
 
+    # -- interactive processes --------------------------------------------- #
+
+    def popen(
+        self,
+        command: str | list[str],
+        **kwargs,
+    ) -> subprocess.Popen:
+        """Start an interactive process inside the sandbox with stdio pipes.
+
+        Unlike :meth:`run` (which aggregates output) and :meth:`run_background`
+        (which redirects to a file), this returns a :class:`subprocess.Popen`
+        object with direct ``stdin``/``stdout``/``stderr`` pipes for
+        bidirectional communication.
+
+        Useful for long-running interactive processes like LSP servers, REPLs,
+        or any protocol that requires streaming stdin/stdout (e.g. JSON-RPC).
+
+        The process runs inside the sandbox's namespace (PID + mount isolation)
+        and chroot, sharing the same filesystem view as :meth:`run`.
+
+        Args:
+            command: Command string or argument list to execute.
+            **kwargs: Additional keyword arguments passed to
+                :class:`subprocess.Popen` (e.g. ``stderr=subprocess.PIPE``).
+                ``stdin``, ``stdout``, and ``env`` are set automatically
+                unless explicitly overridden.
+
+        Returns:
+            :class:`subprocess.Popen` with ``stdin`` and ``stdout`` pipes.
+
+        Example::
+
+            # Start an LSP server inside the sandbox
+            proc = sb.popen(["pyright-langserver", "--stdio"])
+            proc.stdin.write(b'...')  # send JSON-RPC request
+            proc.stdin.flush()
+            response = proc.stdout.readline()  # read response
+            proc.terminate()
+        """
+        shell_pid = self._persistent_shell._process.pid
+
+        if isinstance(command, list):
+            cmd_args = command
+        else:
+            cmd_args = ["bash", "-c", command]
+
+        full_cmd = [
+            "nsenter",
+            f"--target={shell_pid}",
+            "--pid",
+            "--mount",
+            "--",
+            "chroot", str(self._rootfs),
+        ] + cmd_args
+
+        defaults = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": self._cached_env,
+        }
+        defaults.update(kwargs)
+
+        proc = subprocess.Popen(full_cmd, **defaults)
+        logger.debug(
+            "popen pid=%d in sandbox ns (shell_pid=%d): %s",
+            proc.pid, shell_pid, cmd_args,
+        )
+        return proc
+
     # -- reset / delete ---------------------------------------------------- #
 
     def reset(self) -> None:
