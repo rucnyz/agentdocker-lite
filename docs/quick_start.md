@@ -199,6 +199,21 @@ config = SandboxConfig(
 )
 ```
 
+## Crash recovery
+
+If a process crashes without calling `delete()`, sandboxes leak mounts and cgroups. Clean them up with:
+
+```bash
+sudo python -m agentdocker_lite cleanup
+```
+
+For RL training loops, call this at the start of each training run:
+
+```python
+from agentdocker_lite import SandboxBase
+SandboxBase.cleanup_stale()  # clean orphans from previous crashes
+```
+
 ## Performance comparison
 
 | | Docker | agentdocker-lite (root) | Speedup |
