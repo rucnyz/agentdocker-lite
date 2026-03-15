@@ -9,5 +9,8 @@ description = "Lightweight Linux namespace sandbox with persistent shell and ins
 requires-python = ">=3.10"
 license = "MIT"
 
+[project.optional-dependencies]
+dev = ["pytest>=9.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentdocker_lite"]
