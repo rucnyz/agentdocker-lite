@@ -563,6 +563,7 @@ class Sandbox:
         self._fs_backend = "none"
 
         wd = Path(config.working_dir or ".").resolve()
+        wd.mkdir(parents=True, exist_ok=True)
         self._rootfs = wd
 
         self._env_dir = Path(config.env_base_dir) / name
@@ -584,7 +585,7 @@ class Sandbox:
         ll_write = config.landlock_write
         if ll_read is None and ll_write is None:
             ll_read = ["/"]
-            ll_write = [str(wd), "/tmp"]
+            ll_write = [str(wd), "/tmp", "/dev"]
 
         # Find shell directly on the host
         shell = shutil.which("bash") or shutil.which("sh")
