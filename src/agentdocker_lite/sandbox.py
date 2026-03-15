@@ -122,6 +122,7 @@ class _PersistentShell:
         landlock_read: Optional[list[str]] = None,
         landlock_write: Optional[list[str]] = None,
         landlock_tcp_ports: Optional[list[int]] = None,
+        rootless: bool = False,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -134,6 +135,7 @@ class _PersistentShell:
         self._landlock_read = landlock_read
         self._landlock_write = landlock_write
         self._landlock_tcp_ports = landlock_tcp_ports
+        self._rootless = rootless
         self._process: Optional[subprocess.Popen] = None
         self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
@@ -154,10 +156,13 @@ class _PersistentShell:
         self._signal_r = signal_r
         self._signal_fd = signal_w  # Remember fd number for bash scripts
 
-        cmd: list[str] = ["unshare", "--pid", "--mount"]
-        if self._net_isolate:
-            cmd.append("--net")
-        cmd.extend(["--fork", "chroot", str(self._rootfs), self._shell])
+        if self._rootless:
+            cmd: list[str] = [self._shell]
+        else:
+            cmd = ["unshare", "--pid", "--mount"]
+            if self._net_isolate:
+                cmd.append("--net")
+            cmd.extend(["--fork", "chroot", str(self._rootfs), self._shell])
         if "bash" in self._shell:
             cmd.extend(["--norc", "--noprofile"])
 
@@ -191,6 +196,9 @@ class _PersistentShell:
 
         preexec_fn = _preexec
 
+        # cwd is only used in rootless mode (no chroot)
+        popen_cwd = str(self._rootfs) if self._rootless else None
+
         if self._tty:
             master_fd, slave_fd = pty_mod.openpty()
             # Disable echo so input doesn't pollute output.
@@ -204,6 +212,7 @@ class _PersistentShell:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 env=self._env,
+                cwd=popen_cwd,
                 bufsize=0,
                 preexec_fn=preexec_fn,
                 pass_fds=(signal_w,),
@@ -217,6 +226,7 @@ class _PersistentShell:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=self._env,
+                cwd=popen_cwd,
                 bufsize=0,
                 preexec_fn=preexec_fn,
                 pass_fds=(signal_w,),
@@ -227,29 +237,38 @@ class _PersistentShell:
         self._signal_w = None
 
         # Initialize shell: disable prompts, cd to working dir, signal ready.
-        init_script = (
-            "PS1='' PS2=''\n"
-            # Mount /proc (needed for $ORIGIN RPATH, /proc/self/fd, ps, etc.)
-            "mount -t proc proc /proc 2>/dev/null\n"
-            # Populate /dev with essential device nodes and symlinks.
-            # Docker export leaves /dev nearly empty (regular files, not devices).
-            # NOTE: /dev/null must be created FIRST — later 2>/dev/null redirects
-            # would otherwise create it as a regular file on the fresh tmpfs.
-            "mount -t tmpfs -o nosuid,mode=0755 tmpfs /dev 2>/proc/self/fd/1\n"
-            "mknod -m 666 /dev/null c 1 3\n"
-            "mknod -m 666 /dev/zero c 1 5 2>/dev/null\n"
-            "mknod -m 666 /dev/full c 1 7 2>/dev/null\n"
-            "mknod -m 444 /dev/random c 1 8 2>/dev/null\n"
-            "mknod -m 444 /dev/urandom c 1 9 2>/dev/null\n"
-            "mknod -m 666 /dev/tty c 5 0 2>/dev/null\n"
-            "ln -sf /proc/self/fd /dev/fd 2>/dev/null\n"
-            "ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null\n"
-            "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
-            "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
-            "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
-            f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
-            f"echo 0 >&{self._signal_fd}\n"
-        )
+        if self._rootless:
+            # Rootless: no namespace, no chroot — skip /proc mount, /dev
+            # setup, and device node creation (all require root).
+            init_script = (
+                "PS1='' PS2=''\n"
+                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                f"echo 0 >&{self._signal_fd}\n"
+            )
+        else:
+            init_script = (
+                "PS1='' PS2=''\n"
+                # Mount /proc (needed for $ORIGIN RPATH, /proc/self/fd, ps, etc.)
+                "mount -t proc proc /proc 2>/dev/null\n"
+                # Populate /dev with essential device nodes and symlinks.
+                # Docker export leaves /dev nearly empty (regular files, not devices).
+                # NOTE: /dev/null must be created FIRST — later 2>/dev/null redirects
+                # would otherwise create it as a regular file on the fresh tmpfs.
+                "mount -t tmpfs -o nosuid,mode=0755 tmpfs /dev 2>/proc/self/fd/1\n"
+                "mknod -m 666 /dev/null c 1 3\n"
+                "mknod -m 666 /dev/zero c 1 5 2>/dev/null\n"
+                "mknod -m 666 /dev/full c 1 7 2>/dev/null\n"
+                "mknod -m 444 /dev/random c 1 8 2>/dev/null\n"
+                "mknod -m 444 /dev/urandom c 1 9 2>/dev/null\n"
+                "mknod -m 666 /dev/tty c 5 0 2>/dev/null\n"
+                "ln -sf /proc/self/fd /dev/fd 2>/dev/null\n"
+                "ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null\n"
+                "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
+                "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
+                "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
+                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                f"echo 0 >&{self._signal_fd}\n"
+            )
         self._write_input(init_script.encode())
 
         # Wait for the init signal.
@@ -260,14 +279,22 @@ class _PersistentShell:
                 f"(rootfs={self._rootfs}, shell={self._shell})"
             )
 
-        ns_flags = "pid,mount" + (",net" if self._net_isolate else "")
-        logger.debug(
-            "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
-            self._process.pid,
-            self._rootfs,
-            ns_flags,
-            self._tty,
-        )
+        if self._rootless:
+            logger.debug(
+                "Persistent shell started (rootless): pid=%d cwd=%s tty=%s",
+                self._process.pid,
+                self._rootfs,
+                self._tty,
+            )
+        else:
+            ns_flags = "pid,mount" + (",net" if self._net_isolate else "")
+            logger.debug(
+                "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
+                self._process.pid,
+                self._rootfs,
+                ns_flags,
+                self._tty,
+            )
 
     def kill(self) -> None:
         """Kill the shell and all processes in its PID namespace."""
@@ -518,11 +545,86 @@ class Sandbox:
     SUPPORTED_FS_BACKENDS = ("overlayfs", "btrfs")
 
     def __init__(self, config: SandboxConfig, name: str = "default"):
+        self._config = config
+        self._name = name
+        self._rootless = os.geteuid() != 0
+
+        if self._rootless:
+            self._init_rootless(config, name)
+        else:
+            self._init_rootful(config, name)
+
+    # ------------------------------------------------------------------ #
+    #  Rootless init (no namespace / chroot / overlayfs / cgroup)          #
+    # ------------------------------------------------------------------ #
+
+    def _init_rootless(self, config: SandboxConfig, name: str) -> None:
+        """Initialize in rootless mode -- no isolation, Landlock only."""
+        self._fs_backend = "none"
+
+        wd = Path(config.working_dir or ".").resolve()
+        self._rootfs = wd
+
+        self._env_dir = Path(config.env_base_dir) / name
+        self._env_dir.mkdir(parents=True, exist_ok=True)
+
+        # Not used in rootless, but keep attributes to avoid AttributeError
+        self._base_rootfs: Optional[Path] = None
+        self._upper_dir: Optional[Path] = None
+        self._work_dir: Optional[Path] = None
+        self._overlay_mounted = False
+        self._btrfs_active = False
+        self._bind_mounts: list[Path] = []
+        self._cow_tmpdirs: list[str] = []
+        self._cgroup_path: Optional[Path] = None
+        self._cgroup_limits: dict[str, Optional[str]] = {}
+
+        # Auto-enable Landlock if not explicitly configured
+        ll_read = config.landlock_read
+        ll_write = config.landlock_write
+        if ll_read is None and ll_write is None:
+            ll_read = ["/"]
+            ll_write = [str(wd), "/tmp"]
+
+        # Find shell directly on the host
+        shell = shutil.which("bash") or shutil.which("sh")
+        if not shell:
+            raise FileNotFoundError("No bash or sh found on PATH")
+        self._shell = shell
+        self._cached_env = self._build_env()
+
+        self._persistent_shell = _PersistentShell(
+            rootfs=self._rootfs,
+            shell=self._shell,
+            env=self._cached_env,
+            working_dir=str(wd),
+            cgroup_path=None,
+            tty=config.tty,
+            net_isolate=False,
+            seccomp=config.seccomp,
+            landlock_read=ll_read,
+            landlock_write=ll_write,
+            landlock_tcp_ports=config.landlock_tcp_ports,
+            rootless=True,
+        )
+
+        self._bg_handles: dict[str, str] = {}
+
+        logger.info(
+            "Sandbox ready (rootless): name=%s working_dir=%s",
+            name,
+            wd,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Rootful init (full namespace / overlayfs / cgroup isolation)        #
+    # ------------------------------------------------------------------ #
+
+    def _init_rootful(self, config: SandboxConfig, name: str) -> None:
+        """Initialize in rootful mode -- full isolation (existing behavior)."""
         if not config.image:
             raise ValueError("SandboxConfig.image is required.")
 
-        self._config = config
-        self._name = name
         self._fs_backend = config.fs_backend
 
         if self._fs_backend not in self.SUPPORTED_FS_BACKENDS:
@@ -749,21 +851,25 @@ class Sandbox:
             response = proc.stdout.readline()  # read response
             proc.terminate()
         """
-        shell_pid = self._persistent_shell._process.pid
-
         if isinstance(command, list):
             cmd_args = command
         else:
             cmd_args = ["bash", "-c", command]
 
-        full_cmd = [
-            "nsenter",
-            f"--target={shell_pid}",
-            "--pid",
-            "--mount",
-            "--",
-            "chroot", str(self._rootfs),
-        ] + cmd_args
+        if self._rootless:
+            full_cmd = cmd_args
+            popen_cwd = str(self._rootfs)
+        else:
+            shell_pid = self._persistent_shell._process.pid
+            full_cmd = [
+                "nsenter",
+                f"--target={shell_pid}",
+                "--pid",
+                "--mount",
+                "--",
+                "chroot", str(self._rootfs),
+            ] + cmd_args
+            popen_cwd = None
 
         defaults = {
             "stdin": subprocess.PIPE,
@@ -771,12 +877,14 @@ class Sandbox:
             "stderr": subprocess.PIPE,
             "env": self._cached_env,
         }
+        if popen_cwd:
+            defaults["cwd"] = popen_cwd
         defaults.update(kwargs)
 
         proc = subprocess.Popen(full_cmd, **defaults)
         logger.debug(
-            "popen pid=%d in sandbox ns (shell_pid=%d): %s",
-            proc.pid, shell_pid, cmd_args,
+            "popen pid=%d in sandbox (rootless=%s): %s",
+            proc.pid, self._rootless, cmd_args,
         )
         return proc
 
@@ -786,8 +894,14 @@ class Sandbox:
         """Reset the sandbox filesystem to its initial state.
 
         This is the RL fast-path: ~27ms for overlayfs, ~28ms for btrfs.
+        In rootless mode this is a no-op (no overlayfs to clear).
         """
         self._bg_handles.clear()
+
+        if self._rootless:
+            logger.debug("reset() is a no-op in rootless mode")
+            return
+
         t0 = time.monotonic()
 
         self._persistent_shell.kill()
@@ -819,6 +933,19 @@ class Sandbox:
         t0 = time.monotonic()
 
         self._persistent_shell.kill()
+
+        if self._rootless:
+            # Rootless: only clean up env_dir, skip unmount/cgroup
+            if self._env_dir.exists():
+                shutil.rmtree(self._env_dir, ignore_errors=True)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            logger.info(
+                "Deleted sandbox (%.1fms rootless): %s",
+                elapsed_ms,
+                self._env_dir,
+            )
+            return
+
         self._unmount_all()
 
         if self._fs_backend == "btrfs" and self._btrfs_active:
@@ -1328,7 +1455,8 @@ class Sandbox:
         try:
             if hasattr(self, "_persistent_shell"):
                 self._persistent_shell.kill()
-            self._unmount_all()
+            if not getattr(self, "_rootless", False):
+                self._unmount_all()
         except Exception:
             pass
 
