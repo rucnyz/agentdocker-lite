@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -589,3 +590,256 @@ class TestObservability:
         result = sandbox.reclaim_memory()
         # Should return bool, True if pidfd + process_madvise available
         assert isinstance(result, bool)
+
+
+# ------------------------------------------------------------------ #
+#  Filesystem isolation                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestFsIsolation:
+    def test_sandbox_cannot_modify_base_rootfs(self, sandbox):
+        """Writes inside the sandbox must not leak through to the base rootfs."""
+        sandbox.run("echo 'hacked' > /etc/MARKER_FILE_TEST")
+        # Verify the file exists inside the sandbox
+        output, ec = sandbox.run("cat /etc/MARKER_FILE_TEST")
+        assert ec == 0
+        assert "hacked" in output
+        # Base rootfs must NOT have this file
+        base_marker = sandbox._base_rootfs / "etc" / "MARKER_FILE_TEST"
+        assert not base_marker.exists()
+
+    def test_two_sandboxes_isolated(self, tmp_path):
+        """Two sandboxes sharing the same image have independent filesystems."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb1 = Sandbox(config, name="iso-1")
+        sb2 = Sandbox(config, name="iso-2")
+
+        sb1.run("echo 'from-sb1' > /tmp/marker.txt")
+        _, ec = sb2.run("cat /tmp/marker.txt 2>/dev/null")
+        assert ec != 0  # sb2 must not see sb1's file
+
+        sb1.delete()
+        sb2.delete()
+
+    def test_reset_restores_deleted_base_files(self, sandbox):
+        """Deleting a base-image file then resetting should restore it."""
+        # /bin/ls is part of the base image
+        _, ec = sandbox.run("ls /bin/ls")
+        assert ec == 0
+
+        sandbox.run("rm -f /bin/ls")
+        _, ec = sandbox.run("ls /bin/ls 2>/dev/null")
+        assert ec != 0  # ls is gone
+
+        sandbox.reset()
+        _, ec = sandbox.run("ls /bin/ls")
+        assert ec == 0  # restored after reset
+
+    def test_modified_base_file_restored_on_reset(self, sandbox):
+        """Modifying a base-image file then resetting should revert changes."""
+        original, ec = sandbox.run("cat /etc/hostname 2>/dev/null || echo __none__")
+        assert ec == 0
+
+        sandbox.run("echo 'tampered' > /etc/hostname")
+        modified, _ = sandbox.run("cat /etc/hostname")
+        assert "tampered" in modified
+
+        sandbox.reset()
+        restored, _ = sandbox.run("cat /etc/hostname 2>/dev/null || echo __none__")
+        assert restored.strip() == original.strip()
+
+
+# ------------------------------------------------------------------ #
+#  Process / PID namespace isolation                                   #
+# ------------------------------------------------------------------ #
+
+
+class TestPidIsolation:
+    def test_pid_1_is_not_host_init(self, sandbox):
+        """PID 1 inside the sandbox should be the sandbox shell, not host init."""
+        output, ec = sandbox.run("cat /proc/1/cmdline 2>/dev/null | tr '\\0' ' '")
+        assert ec == 0
+        # PID 1 should be unshare/bash, not systemd/init
+        assert "systemd" not in output
+
+    def test_sandbox_sees_limited_pids(self, sandbox):
+        """The sandbox should see far fewer processes than the host."""
+        output, ec = sandbox.run("ls /proc | grep -E '^[0-9]+$' | wc -l")
+        assert ec == 0
+        sandbox_pids = int(output.strip())
+        # A fresh sandbox should have very few PIDs (shell + ls + wc pipeline)
+        assert sandbox_pids < 20
+
+    def test_shell_state_not_leaked_between_commands(self, sandbox):
+        """Each command runs in a sub-shell; env vars don't leak across runs."""
+        sandbox.run("export SECRET_VAR=s3cret_12345")
+        output, ec = sandbox.run("echo $SECRET_VAR")
+        assert ec == 0
+        assert "s3cret_12345" not in output
+
+
+# ------------------------------------------------------------------ #
+#  cgroup v2 resource limits                                           #
+# ------------------------------------------------------------------ #
+
+
+def _cgroup_v2_available():
+    return Path("/sys/fs/cgroup/cgroup.controllers").exists()
+
+
+class TestResourceLimits:
+    def test_memory_limit_enforced(self, tmp_path):
+        """A process exceeding memory_max should be killed or fail to allocate."""
+        _requires_root()
+        _requires_docker()
+        if not _cgroup_v2_available():
+            pytest.skip("cgroup v2 not available")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            memory_max="16777216",  # 16 MB
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="mem-limit")
+        # Try to allocate 100 MB -- should fail or be killed
+        _, ec = sb.run(
+            "python3 -c 'x = bytearray(100*1024*1024)' 2>&1",
+            timeout=10,
+        )
+        assert ec != 0
+        sb.delete()
+
+    def test_pids_limit_enforced(self, tmp_path):
+        """pids_max should be correctly written to the cgroup."""
+        _requires_root()
+        _requires_docker()
+        if not _cgroup_v2_available():
+            pytest.skip("cgroup v2 not available")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            pids_max="42",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="pid-limit")
+        # Verify cgroup pids.max is set correctly from the host side
+        cgroup_path = sb._cgroup_path
+        assert cgroup_path is not None, "cgroup was not created"
+        pids_max_value = (cgroup_path / "pids.max").read_text().strip()
+        assert pids_max_value == "42", f"Expected pids.max=42, got {pids_max_value}"
+        # Verify sandbox is still functional
+        output, ec = sb.run("echo pids-ok")
+        assert ec == 0
+        assert "pids-ok" in output
+        sb.delete()
+
+    def test_cpu_max_accepted(self, tmp_path):
+        """cpu_max config should not cause errors during sandbox creation."""
+        _requires_root()
+        _requires_docker()
+        if not _cgroup_v2_available():
+            pytest.skip("cgroup v2 not available")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            cpu_max="50000 100000",  # 50% of one CPU
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="cpu-limit")
+        output, ec = sb.run("echo cpu-ok")
+        assert ec == 0
+        assert "cpu-ok" in output
+        sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Edge cases and robustness                                           #
+# ------------------------------------------------------------------ #
+
+
+class TestEdgeCases:
+    def test_empty_command(self, sandbox):
+        """Empty command should not hang or crash."""
+        output, ec = sandbox.run("")
+        assert ec == 0
+
+    def test_very_long_command(self, sandbox):
+        """A command with a very large argument should work."""
+        long_arg = "A" * 100_000
+        output, ec = sandbox.run(f"echo {long_arg}")
+        assert ec == 0
+        assert long_arg in output
+
+    def test_command_with_embedded_newlines(self, sandbox):
+        """Multiline shell script passed as a single command."""
+        output, ec = sandbox.run("echo line1\necho line2\necho line3")
+        assert ec == 0
+        assert "line1" in output
+
+    def test_rapid_run_reset_cycles(self, sandbox):
+        """Simulate an RL training loop: many run-reset cycles."""
+        for i in range(50):
+            output, ec = sandbox.run(
+                f"echo step-{i} && touch /workspace/file-{i}.txt"
+            )
+            assert ec == 0, f"Failed at step {i}"
+            assert f"step-{i}" in output
+            sandbox.reset()
+
+    def test_command_list_form(self, sandbox):
+        """run() accepts a list of arguments as well as a string."""
+        output, ec = sandbox.run(["echo", "hello", "world"])
+        assert ec == 0
+        assert "hello world" in output
+
+    def test_run_after_delete(self, tmp_path):
+        """Running a command after delete should fail gracefully."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="dead-sandbox")
+        sb.delete()
+        # rootfs is gone, so run() should raise (shell can't restart)
+        with pytest.raises((RuntimeError, OSError)):
+            sb.run("echo hello")
+
+    def test_concurrent_commands_on_same_sandbox(self, sandbox):
+        """Multiple threads issuing commands to one sandbox should serialize."""
+
+        def worker(i):
+            output, ec = sandbox.run(f"echo {i}")
+            return i, output.strip(), ec
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(worker, range(20)))
+
+        for i, output, ec in results:
+            assert ec == 0
+            assert str(i) in output
+
+    def test_stderr_captured(self, sandbox):
+        """stderr output should be captured alongside stdout."""
+        output, ec = sandbox.run("echo out; echo err >&2")
+        assert ec == 0
+        assert "out" in output
+        assert "err" in output
+
