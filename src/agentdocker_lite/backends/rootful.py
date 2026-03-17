@@ -1042,14 +1042,21 @@ class RootfulSandbox(SandboxBase):
         if not self._config.net_isolate:
             logger.warning("port_map requires net_isolate=True; ignoring port_map")
             return
-        if not shutil.which("pasta"):
+
+        # Find pasta: vendored binary first, then system PATH
+        vendored = Path(__file__).parent.parent / "_vendor" / "pasta"
+        if vendored.exists() and vendored.is_file():
+            pasta_bin = str(vendored)
+        elif shutil.which("pasta"):
+            pasta_bin = "pasta"
+        else:
             raise FileNotFoundError(
                 "port_map requires 'pasta' (from the passt package). "
                 "Install: pacman -S passt / apt install passt"
             )
 
         shell_pid = self._persistent_shell._process.pid
-        cmd: list[str] = ["pasta", "--config-net", "-q"]
+        cmd: list[str] = [pasta_bin, "--config-net", "-q"]
         for mapping in port_map:
             # "8080:80" → -t 8080:80 (TCP), -u for UDP
             cmd.extend(["-t", mapping])
