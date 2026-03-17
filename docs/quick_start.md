@@ -92,6 +92,33 @@ config = SandboxConfig(
 
 Without root: applied via `systemd-run --user --scope`. With root: direct cgroup v2 writes.
 
+## Port mapping (pasta networking)
+
+```python
+config = SandboxConfig(
+    image="ubuntu:22.04",
+    working_dir="/workspace",
+    net_isolate=True,
+    port_map=["8080:80", "3000:3000"],  # host:container TCP ports
+)
+```
+
+Uses a vendored `pasta` binary (bundled, no install needed). The sandbox gets an isolated network namespace with NAT'd internet access and TCP port forwarding.
+
+## Filesystem snapshots
+
+Save and restore sandbox filesystem state (lightweight alternative to CRIU):
+
+```python
+sb.run("echo v1 > /workspace/data.txt")
+sb.snapshot("/tmp/checkpoint_v1")    # save current state
+
+sb.run("echo v2 > /workspace/data.txt")
+sb.restore("/tmp/checkpoint_v1")     # restore to v1
+
+sb.reset()                           # back to clean image (not snapshot)
+```
+
 ## Container configuration
 
 ```python
@@ -102,9 +129,28 @@ config = SandboxConfig(
     hostname="worker-0",              # custom hostname (UTS namespace)
     dns=["8.8.8.8", "1.1.1.1"],      # custom DNS servers
     read_only=True,                   # read-only rootfs (/dev, /proc, volumes still writable)
-    net_isolate=True,                 # loopback only, no host network
+    net_isolate=True,                 # loopback only (or use port_map for NAT + ports)
 )
 ```
+
+## GPU passthrough
+
+For NVIDIA GPU access inside the sandbox, mount the device and driver libraries:
+
+```python
+config = SandboxConfig(
+    image="ubuntu:22.04",
+    devices=["/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"],
+    volumes=[
+        "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so:/usr/lib/libnvidia-ml.so:ro",
+        "/usr/lib/x86_64-linux-gnu/libcuda.so:/usr/lib/libcuda.so:ro",
+        # ... add other driver libs as needed
+    ],
+    environment={"NVIDIA_VISIBLE_DEVICES": "0"},
+)
+```
+
+Device passthrough requires root. For rootless GPU access, consider mounting the GPU device with appropriate permissions beforehand.
 
 ## Security hardening
 
@@ -186,6 +232,10 @@ No root required. Reproduce: `python examples/benchmark.py`
 | `--dns 8.8.8.8` | `dns=["8.8.8.8"]` |
 | `--read-only` | `read_only=True` |
 | `--network none` | `net_isolate=True` |
+| `-p 8080:80` | `net_isolate=True, port_map=["8080:80"]` |
+| `docker commit` / `docker save` | `sb.snapshot("/path")` |
+| `docker import` / `docker load` | `sb.restore("/path")` |
+| `--gpus all` | `devices=["/dev/nvidia0", ...]` (root only) |
 | `-e KEY=value` | `environment={"KEY": "value"}` |
 | `--device /dev/kvm` | `devices=["/dev/kvm"]` (root only) |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
