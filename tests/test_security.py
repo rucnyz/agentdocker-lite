@@ -1,7 +1,6 @@
-"""Tests for security hardening: seccomp, Landlock, rootless mode.
+"""Tests for security hardening: seccomp, user namespace mode, devices.
 
-seccomp and Landlock tests require root (applied inside sandbox child).
-Rootless tests run without root (that's the point).
+seccomp tests require root. User namespace tests must run as non-root.
 
 Run with: sudo python -m pytest tests/test_security.py -v
 """
@@ -10,7 +9,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -52,33 +50,18 @@ def root_sandbox(tmp_path):
 
 
 @pytest.fixture
-def rootless_sandbox(tmp_path):
-    """Rootless sandbox — skipped if running as root."""
+def userns_sandbox(tmp_path):
+    """User namespace sandbox — skipped if running as root."""
     if os.geteuid() == 0:
-        pytest.skip("rootless test must run as non-root")
-    wd = tmp_path / "rootless-ws"
+        pytest.skip("userns test must run as non-root")
+    _requires_docker()
     config = SandboxConfig(
-        working_dir=str(wd),
+        image=TEST_IMAGE,
+        working_dir="/workspace",
         env_base_dir=str(tmp_path / "envs"),
+        rootfs_cache_dir=str(tmp_path / "cache"),
     )
-    sb = Sandbox(config, name="rootless-test")
-    yield sb
-    sb.delete()
-
-
-@pytest.fixture
-def landlock_sandbox(tmp_path):
-    """Rootless sandbox with explicit Landlock paths."""
-    if os.geteuid() == 0:
-        pytest.skip("Landlock tests run in rootless mode")
-    wd = tmp_path / "ll-ws"
-    config = SandboxConfig(
-        working_dir=str(wd),
-        env_base_dir=str(tmp_path / "envs"),
-        landlock_read=["/"],
-        landlock_write=[str(wd), "/tmp", "/dev"],
-    )
-    sb = Sandbox(config, name="ll-test")
+    sb = Sandbox(config, name="userns-test")
     yield sb
     sb.delete()
 
@@ -127,133 +110,63 @@ class TestSeccomp:
 
 
 # ------------------------------------------------------------------ #
-#  Landlock tests (root mode)                                          #
+#  User namespace tests (non-root)                                     #
 # ------------------------------------------------------------------ #
 
 
-class TestLandlock:
-    """Verify Landlock restricts filesystem access."""
+class TestUserNamespace:
+    """Verify user namespace sandbox works without root."""
 
-    def test_write_allowed_path(self, landlock_sandbox):
-        """Writing to allowed path should work."""
-        output, ec = landlock_sandbox.run("echo test > test.txt && cat test.txt")
-        assert ec == 0
-        assert "test" in output
-
-    def test_write_tmp_allowed(self, landlock_sandbox):
-        """Writing to /tmp should work."""
-        output, ec = landlock_sandbox.run("echo tmp > /tmp/test.txt && cat /tmp/test.txt")
-        assert ec == 0
-        assert "tmp" in output
-
-    def test_write_denied_path(self, landlock_sandbox):
-        """Writing outside allowed paths should be denied."""
-        output, ec = landlock_sandbox.run("echo bad > /etc/test 2>&1")
-        assert ec != 0 or "Permission denied" in output
-
-    def test_read_allowed(self, landlock_sandbox):
-        """Reading should work (read=['/'] allows everything)."""
-        output, ec = landlock_sandbox.run("cat /etc/hostname")
-        assert ec == 0
-        assert len(output.strip()) > 0
-
-
-# ------------------------------------------------------------------ #
-#  Rootless mode tests (non-root)                                      #
-# ------------------------------------------------------------------ #
-
-
-class TestRootless:
-    """Verify rootless sandbox works without root."""
-
-    def test_basic_command(self, rootless_sandbox):
+    def test_basic_command(self, userns_sandbox):
         """Basic echo should work."""
-        output, ec = rootless_sandbox.run("echo hello rootless")
+        output, ec = userns_sandbox.run("echo hello userns")
         assert ec == 0
-        assert "hello rootless" in output
+        assert "hello userns" in output
 
-    def test_working_directory(self, rootless_sandbox):
+    def test_working_directory(self, userns_sandbox):
         """Should start in the configured working directory."""
-        output, ec = rootless_sandbox.run("pwd")
+        output, ec = userns_sandbox.run("pwd")
         assert ec == 0
-        assert "rootless-ws" in output
+        assert "workspace" in output
 
-    def test_write_cwd_allowed(self, rootless_sandbox):
-        """Writing to working directory should be allowed."""
-        output, ec = rootless_sandbox.run("echo data > test.txt && cat test.txt")
+    def test_file_io(self, userns_sandbox):
+        """write_file/read_file should work via manual overlay."""
+        userns_sandbox.write_file("/workspace/test.txt", "hello from host\n")
+        content = userns_sandbox.read_file("/workspace/test.txt")
+        assert "hello from host" in content
+
+    def test_reset_clears_files(self, userns_sandbox):
+        """Reset should clear sandbox changes (overlayfs upper)."""
+        userns_sandbox.run("echo ephemeral > /workspace/temp.txt")
+        userns_sandbox.reset()
+        _, ec = userns_sandbox.run("cat /workspace/temp.txt 2>/dev/null")
+        assert ec != 0  # file should be gone
+
+    def test_dev_null(self, userns_sandbox):
+        """/dev/null should work (bind-mounted from host)."""
+        output, ec = userns_sandbox.run("echo test > /dev/null && echo ok")
         assert ec == 0
-        assert "data" in output
+        assert "ok" in output
 
-    def test_write_tmp_allowed(self, rootless_sandbox):
-        """Writing to /tmp should be allowed."""
-        output, ec = rootless_sandbox.run("echo tmp > /tmp/rootless-test-file && cat /tmp/rootless-test-file")
+    def test_proc_mounted(self, userns_sandbox):
+        """/proc should be mounted."""
+        output, ec = userns_sandbox.run("cat /proc/1/cmdline 2>/dev/null | tr '\\0' ' '")
         assert ec == 0
-        assert "tmp" in output
 
-    def test_write_etc_denied(self, rootless_sandbox):
-        """Writing to /etc should be denied by Landlock."""
-        output, ec = rootless_sandbox.run("echo bad > /etc/rootless-test 2>&1")
-        assert ec != 0 or "Permission denied" in output
-
-    def test_read_everywhere(self, rootless_sandbox):
-        """Reading should work everywhere (default: read=['/'])."""
-        output, ec = rootless_sandbox.run("cat /etc/hostname")
-        assert ec == 0
-        assert len(output.strip()) > 0
-
-    def test_no_image_required(self, tmp_path):
-        """Rootless mode should not require an image."""
-        if os.geteuid() == 0:
-            pytest.skip("rootless test must run as non-root")
-        wd = tmp_path / "no-image-ws"
-        config = SandboxConfig(
-            working_dir=str(wd),
-            env_base_dir=str(tmp_path / "envs"),
-        )
-        sb = Sandbox(config, name="no-image")
-        output, ec = sb.run("echo works")
-        assert ec == 0
-        assert "works" in output
-        sb.delete()
-
-    def test_reset_is_noop(self, rootless_sandbox):
-        """reset() should be a no-op in rootless mode."""
-        rootless_sandbox.run("echo data > test.txt")
-        rootless_sandbox.reset()
-        # File should still exist (no overlayfs to clear)
-        output, ec = rootless_sandbox.run("cat test.txt")
-        assert ec == 0
-        assert "data" in output
-
-    def test_sequential_commands(self, rootless_sandbox):
+    def test_sequential_commands(self, userns_sandbox):
         """Multiple sequential commands should work."""
         for i in range(5):
-            output, ec = rootless_sandbox.run(f"echo iter-{i}")
+            output, ec = userns_sandbox.run(f"echo iter-{i}")
             assert ec == 0
             assert f"iter-{i}" in output
 
-    def test_custom_landlock(self, tmp_path):
-        """Custom Landlock paths should be respected."""
-        if os.geteuid() == 0:
-            pytest.skip("rootless test must run as non-root")
-        wd = tmp_path / "custom-ll-ws"
-        config = SandboxConfig(
-            working_dir=str(wd),
-            env_base_dir=str(tmp_path / "envs"),
-            landlock_read=[str(wd), "/usr", "/lib", "/dev"],
-            landlock_write=[str(wd), "/dev"],
-        )
-        sb = Sandbox(config, name="custom-ll")
-        try:
-            # Write to cwd should work
-            output, ec = sb.run("echo ok > test.txt && cat test.txt")
-            assert ec == 0
-            assert "ok" in output
-            # Write to /tmp should be denied (not in write list)
-            output, ec = sb.run("echo bad > /tmp/denied 2>&1")
-            assert ec != 0 or "Permission denied" in output
-        finally:
-            sb.delete()
+    def test_popen(self, userns_sandbox):
+        """popen() should work in userns mode via nsenter --user."""
+        proc = userns_sandbox.popen("echo popen-userns")
+        assert proc.stdout
+        output = proc.stdout.read()
+        proc.wait(timeout=5)
+        assert b"popen-userns" in output
 
 
 # ------------------------------------------------------------------ #

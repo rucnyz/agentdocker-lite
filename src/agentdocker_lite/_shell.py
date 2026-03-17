@@ -45,7 +45,8 @@ class _PersistentShell:
         landlock_read: Optional[list[str]] = None,
         landlock_write: Optional[list[str]] = None,
         landlock_tcp_ports: Optional[list[int]] = None,
-        rootless: bool = False,
+        userns_setup_script: Optional[str] = None,
+        systemd_scope_properties: Optional[list[str]] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -58,7 +59,9 @@ class _PersistentShell:
         self._landlock_read = landlock_read
         self._landlock_write = landlock_write
         self._landlock_tcp_ports = landlock_tcp_ports
-        self._rootless = rootless
+        self._userns = userns_setup_script is not None
+        self._userns_setup_script = userns_setup_script
+        self._systemd_scope_properties = systemd_scope_properties
         self._process: Optional[subprocess.Popen] = None
         self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
@@ -79,38 +82,43 @@ class _PersistentShell:
         self._signal_r = signal_r
         self._signal_fd = signal_w  # Remember fd number for bash scripts
 
-        if self._rootless:
-            cmd: list[str] = [self._shell]
+        if self._userns:
+            # User namespace mode: setup script handles mount/chroot,
+            # stdin is used for phase 2 init (post-chroot).
+            unshare_cmd: list[str] = [
+                "unshare", "--user", "--map-root-user", "--pid", "--mount",
+            ]
+            if self._net_isolate:
+                unshare_cmd.append("--net")
+            unshare_cmd.extend(["--fork", "bash", str(self._userns_setup_script)])
+
+            # Wrap in systemd-run --user --scope for cgroup delegation
+            if self._systemd_scope_properties:
+                cmd: list[str] = ["systemd-run", "--user", "--scope", "--quiet"]
+                for prop in self._systemd_scope_properties:
+                    cmd.extend(["--property", prop])
+                cmd.append("--")
+                cmd.extend(unshare_cmd)
+            else:
+                cmd = unshare_cmd
         else:
+            # Rootful mode: direct chroot via unshare.
             cmd = ["unshare", "--pid", "--mount"]
             if self._net_isolate:
                 cmd.append("--net")
             cmd.extend(["--fork", "chroot", str(self._rootfs), self._shell])
-        if "bash" in self._shell:
-            cmd.extend(["--norc", "--noprofile"])
+            if "bash" in self._shell:
+                cmd.extend(["--norc", "--noprofile"])
 
         # Build preexec_fn
         _cg_path = self._cgroup_path
-        if self._rootless:
-            # Rootless: Landlock + seccomp in preexec (no unshare/chroot to interfere)
-            _seccomp = self._seccomp
-            _ll_read = self._landlock_read
-            _ll_write = self._landlock_write
-            _ll_ports = self._landlock_tcp_ports
 
+        if self._userns:
+            # User namespace: no cgroup, no landlock in preexec.
             def _preexec() -> None:
-                if _ll_read is not None or _ll_write is not None:
-                    from agentdocker_lite.security import apply_landlock
-                    apply_landlock(
-                        read_paths=_ll_read,
-                        write_paths=_ll_write,
-                        allowed_tcp_ports=_ll_ports,
-                    )
-                if _seccomp:
-                    from agentdocker_lite.security import apply_seccomp_filter
-                    apply_seccomp_filter()
+                pass
         else:
-            # Root mode: only cgroup in preexec. seccomp applied via init script
+            # Rootful: cgroup in preexec. seccomp applied via init script
             # AFTER mount /proc + /dev (which need mount syscall to work first).
             def _preexec() -> None:
                 if _cg_path:
@@ -122,8 +130,10 @@ class _PersistentShell:
 
         preexec_fn = _preexec
 
-        # cwd is only used in rootless mode (no chroot)
-        popen_cwd = str(self._rootfs) if self._rootless else None
+        # When systemd-run wraps the command, it needs host env
+        # (DBUS_SESSION_BUS_ADDRESS etc.) to talk to the user's systemd.
+        # The sandbox env is applied inside the chroot via the init_script.
+        popen_env = None if self._systemd_scope_properties else self._env
 
         if self._tty:
             master_fd, slave_fd = pty_mod.openpty()
@@ -137,11 +147,11 @@ class _PersistentShell:
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
-                env=self._env,
-                cwd=popen_cwd,
+                env=popen_env,
                 bufsize=0,
                 preexec_fn=preexec_fn,
                 pass_fds=(signal_w,),
+                start_new_session=True,
             )
             os.close(slave_fd)
             self._master_fd = master_fd
@@ -151,11 +161,11 @@ class _PersistentShell:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                env=self._env,
-                cwd=popen_cwd,
+                env=popen_env,
                 bufsize=0,
                 preexec_fn=preexec_fn,
                 pass_fds=(signal_w,),
+                start_new_session=True,
             )
 
         # Close write end in parent -- only the child should write to it.
@@ -163,12 +173,24 @@ class _PersistentShell:
         self._signal_w = None
 
         # Initialize shell: disable prompts, cd to working dir, signal ready.
-        if self._rootless:
-            # Rootless: no namespace, no chroot — skip /proc mount, /dev
-            # setup, and device node creation (all require root).
+        # In userns mode, /proc and /dev are already set up by the setup script
+        # before chroot.  In rootful mode, they're set up here (inside chroot).
+        _seccomp_snippet = (
+            "for py in python3 python3.13 python3.12 python3.11 python3.10 python; do\n"
+            "  if command -v $py >/dev/null 2>&1; then\n"
+            "    $py /tmp/.adl_seccomp.py 2>/dev/null && break\n"
+            "  fi\n"
+            "done\n"
+            if self._seccomp else ""
+        )
+
+        if self._userns:
+            # User namespace: setup script already did mount/dev/chroot.
+            # This runs inside the chroot bash (read from stdin pipe).
             init_script = (
                 "PS1='' PS2=''\n"
-                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                + _seccomp_snippet
+                + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
         else:
@@ -192,16 +214,7 @@ class _PersistentShell:
                 "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
                 "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
                 "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
-                # Apply seccomp AFTER mounts (mount syscall needed above).
-                # Try multiple python interpreters since images vary.
-                + (
-                    "for py in python3 python3.13 python3.12 python3.11 python3.10 python; do\n"
-                    "  if command -v $py >/dev/null 2>&1; then\n"
-                    "    $py /tmp/.adl_seccomp.py 2>/dev/null && break\n"
-                    "  fi\n"
-                    "done\n"
-                    if self._seccomp else ""
-                )
+                + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
@@ -215,31 +228,33 @@ class _PersistentShell:
                 f"(rootfs={self._rootfs}, shell={self._shell})"
             )
 
-        if self._rootless:
-            logger.debug(
-                "Persistent shell started (rootless): pid=%d cwd=%s tty=%s",
-                self._process.pid,
-                self._rootfs,
-                self._tty,
-            )
-        else:
-            ns_flags = "pid,mount" + (",net" if self._net_isolate else "")
-            logger.debug(
-                "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
-                self._process.pid,
-                self._rootfs,
-                ns_flags,
-                self._tty,
-            )
+        ns_flags = "user,pid,mount" if self._userns else "pid,mount"
+        if self._net_isolate:
+            ns_flags += ",net"
+        logger.debug(
+            "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
+            self._process.pid,
+            self._rootfs,
+            ns_flags,
+            self._tty,
+        )
 
     def kill(self) -> None:
         """Kill the shell and all processes in its PID namespace."""
         if self._process is not None:
             try:
-                self._process.kill()
+                # Kill the entire process group (unshare + forked children).
+                # start_new_session=True makes the process a session leader,
+                # so its PID == PGID.
+                import signal
+                os.killpg(self._process.pid, signal.SIGKILL)
                 self._process.wait(timeout=5)
             except Exception:
-                pass
+                try:
+                    self._process.kill()
+                    self._process.wait(timeout=5)
+                except Exception:
+                    pass
             self._process = None
         if self._master_fd is not None:
             try:

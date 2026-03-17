@@ -264,8 +264,9 @@ LANDLOCK_CREATE_RULESET = 444
 LANDLOCK_ADD_RULE = 445
 LANDLOCK_RESTRICT_SELF = 446
 
-# Flag for ABI version query
+# Flags for landlock_create_ruleset
 LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
+LANDLOCK_CREATE_RULESET_ERRATA = 1 << 1   # ABI v7 (kernel 6.15)
 
 # FS access flags by ABI version
 LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
@@ -295,6 +296,11 @@ LANDLOCK_SCOPE_SIGNAL = 1 << 1
 
 LANDLOCK_RULE_PATH_BENEATH = 1
 LANDLOCK_RULE_NET_PORT = 2
+
+# Flags for landlock_restrict_self (ABI v7, kernel 6.15)
+LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF = 1 << 0
+LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON = 1 << 1
+LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF = 1 << 2
 
 # Permission sets
 FS_READ = (
@@ -453,7 +459,14 @@ def apply_landlock(
 
         _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 
-        ret = _syscall(LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)
+        # ABI v7: enable audit logging for denied access attempts
+        restrict_flags = 0
+        if abi >= 7:
+            restrict_flags = (
+                LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
+            )
+
+        ret = _syscall(LANDLOCK_RESTRICT_SELF, ruleset_fd, restrict_flags)
         if ret < 0:
             msg = f"landlock_restrict_self failed: errno={ctypes.get_errno()}"
             if strict:
@@ -463,7 +476,8 @@ def apply_landlock(
     finally:
         os.close(ruleset_fd)
 
-    logger.debug("Landlock (ABI v%d): %d read, %d write paths, %d TCP ports, scoped=%d",
+    logger.debug("Landlock (ABI v%d): %d read, %d write paths, %d TCP ports, "
+                 "scoped=%d, restrict_flags=%d",
                  abi, len(read_paths or []), len(write_paths or []),
-                 len(allowed_tcp_ports or []), scoped)
+                 len(allowed_tcp_ports or []), scoped, restrict_flags)
     return True

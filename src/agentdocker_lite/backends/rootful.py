@@ -27,7 +27,7 @@ from agentdocker_lite._shell import _PersistentShell
 logger = logging.getLogger(__name__)
 
 
-class NamespaceSandbox(SandboxBase):
+class RootfulSandbox(SandboxBase):
     """Linux namespace sandbox with pluggable CoW filesystem backend.
 
     Each instance manages one isolated environment with:
@@ -53,8 +53,9 @@ class NamespaceSandbox(SandboxBase):
     def __init__(self, config: SandboxConfig, name: str = "default"):
         self._config = config
         self._name = name
-        self._rootless = False
+        self._userns = False
         self._init_rootful(config, name)
+        self._register(self)
 
     # ------------------------------------------------------------------ #
     #  Rootful init (full namespace / overlayfs / cgroup isolation)        #
@@ -167,6 +168,257 @@ class NamespaceSandbox(SandboxBase):
         )
 
     # ------------------------------------------------------------------ #
+    #  User namespace init (no real root required)                          #
+    # ------------------------------------------------------------------ #
+
+    def _init_userns(self, config: SandboxConfig, name: str) -> None:
+        """Initialize in user namespace mode -- namespace+overlayfs without root."""
+        if not config.image:
+            raise ValueError("SandboxConfig.image is required.")
+
+        if config.fs_backend != "overlayfs":
+            raise ValueError(
+                f"Rootless mode only supports overlayfs, got fs_backend={config.fs_backend!r}. "
+                f"btrfs requires root."
+            )
+        self._fs_backend = "overlayfs"
+
+        self._check_prerequisites_userns()
+
+        # --- paths --------------------------------------------------------
+        rootfs_cache_dir = Path(config.rootfs_cache_dir)
+        self._base_rootfs = self._resolve_base_rootfs(
+            image=config.image,
+            fs_backend="overlayfs",
+            rootfs_cache_dir=rootfs_cache_dir,
+        )
+
+        env_base = Path(config.env_base_dir)
+        self._env_dir = env_base / name
+        self._rootfs = self._env_dir / "rootfs"   # overlay merged (inside namespace only)
+        self._upper_dir = self._env_dir / "upper"
+        self._work_dir = self._env_dir / "work"
+
+        for d in (self._upper_dir, self._work_dir, self._rootfs):
+            d.mkdir(parents=True, exist_ok=True)
+
+        # --- state tracking -----------------------------------------------
+        self._overlay_mounted = False
+        self._btrfs_active = False
+        self._bind_mounts: list[Path] = []
+        self._cow_tmpdirs: list[str] = []
+        self._cgroup_path: Optional[Path] = None
+        self._cgroup_limits = {
+            "cpu_max": config.cpu_max,
+            "memory_max": config.memory_max,
+            "pids_max": config.pids_max,
+        }
+
+        # --- cgroup via systemd delegation --------------------------------
+        self._systemd_scope_properties: list[str] = []
+        if any(self._cgroup_limits.values()):
+            if shutil.which("systemd-run"):
+                prop_map = {
+                    "cpu_max": "CPUQuota",
+                    "memory_max": "MemoryMax",
+                    "pids_max": "TasksMax",
+                }
+                for key, sd_prop in prop_map.items():
+                    value = self._cgroup_limits.get(key)
+                    if value:
+                        if key == "cpu_max":
+                            # Convert "50000 100000" → "50%"
+                            parts = value.split()
+                            if len(parts) == 2:
+                                pct = int(int(parts[0]) / int(parts[1]) * 100)
+                                self._systemd_scope_properties.append(f"{sd_prop}={pct}%")
+                        else:
+                            self._systemd_scope_properties.append(f"{sd_prop}={value}")
+                logger.debug(
+                    "cgroup via systemd delegation: %s",
+                    self._systemd_scope_properties,
+                )
+            else:
+                logger.warning(
+                    "cgroup resource limits requested but systemd-run not found. "
+                    "Run as root for direct cgroup access."
+                )
+        if config.devices:
+            logger.warning(
+                "Device passthrough is not available in user namespace mode. "
+                "Run as root to enable device passthrough."
+            )
+
+        # --- seccomp helper in upper dir ----------------------------------
+        if config.seccomp:
+            self._write_seccomp_helper_userns()
+
+        # --- working dir in upper dir -------------------------------------
+        if config.working_dir and config.working_dir != "/":
+            wd = self._upper_dir / config.working_dir.lstrip("/")
+            wd.mkdir(parents=True, exist_ok=True)
+
+        # --- generate setup script ----------------------------------------
+        self._shell = self._detect_shell()
+        setup_script_path = self._generate_userns_setup_script()
+
+        self._cached_env = self._build_env()
+
+        # --- start persistent shell ---------------------------------------
+        t0 = time.monotonic()
+        self._persistent_shell = _PersistentShell(
+            rootfs=self._rootfs,
+            shell=self._shell,
+            env=self._cached_env,
+            working_dir=config.working_dir or "/",
+            tty=config.tty,
+            net_isolate=config.net_isolate,
+            seccomp=config.seccomp,
+            userns_setup_script=str(setup_script_path),
+            systemd_scope_properties=self._systemd_scope_properties or None,
+        )
+        shell_ms = (time.monotonic() - t0) * 1000
+
+        self._bg_handles: dict[str, str] = {}
+
+        # Write PID file for stale sandbox cleanup
+        pid_file = self._env_dir / ".pid"
+        pid_file.write_text(str(os.getpid()))
+
+        logger.info(
+            "Sandbox ready (userns): name=%s rootfs=%s [shell=%.1fms]",
+            name, self._rootfs, shell_ms,
+        )
+
+    def _generate_userns_setup_script(self) -> Path:
+        """Generate bash setup script for user namespace mode.
+
+        This script runs inside the user namespace (before chroot) and:
+        1. Mounts overlayfs
+        2. Mounts /proc and /dev (with bind-mounted devices, no mknod)
+        3. Bind-mounts volumes
+        4. Execs into chroot -- after this, stdin commands go to the inner bash
+        """
+        merged = self._rootfs
+        base = self._base_rootfs
+        upper = self._upper_dir
+        work = self._work_dir
+        shell = self._shell
+        norc = " --norc --noprofile" if "bash" in shell else ""
+
+        lines = [
+            "#!/bin/bash",
+            "set -e",
+            "",
+            "# Fix 000-perm dirs left by previous overlayfs (shell restart)",
+            f"chmod -R 700 {work} 2>/dev/null || true",
+            f"rm -rf {work}/work 2>/dev/null || true",
+            "",
+            "# Mount overlayfs",
+            f"mount -t overlay overlay "
+            f"-o lowerdir={base},upperdir={upper},workdir={work} {merged}",
+            "",
+            "# Mount /proc",
+            f"mount -t proc proc {merged}/proc",
+            # sysfs only works in userns when network namespace is also new
+            f"mount -t sysfs sysfs {merged}/sys 2>/dev/null || true"
+            if self._config.net_isolate else
+            f"# /sys: skipped (requires net_isolate=True in userns)",
+            "",
+            "# Setup /dev (bind mount from host -- mknod not available in userns)",
+            f"mount -t tmpfs -o nosuid,mode=0755 tmpfs {merged}/dev",
+        ]
+
+        for dev in ["null", "zero", "full", "random", "urandom", "tty"]:
+            lines.append(f"touch {merged}/dev/{dev} 2>/dev/null || true")
+            lines.append(
+                f"mount --bind /dev/{dev} {merged}/dev/{dev} 2>/dev/null || true"
+            )
+
+        lines.extend([
+            f"ln -sf /proc/self/fd {merged}/dev/fd 2>/dev/null || true",
+            f"ln -sf /proc/self/fd/0 {merged}/dev/stdin 2>/dev/null || true",
+            f"ln -sf /proc/self/fd/1 {merged}/dev/stdout 2>/dev/null || true",
+            f"ln -sf /proc/self/fd/2 {merged}/dev/stderr 2>/dev/null || true",
+            f"mkdir -p {merged}/dev/pts {merged}/dev/shm 2>/dev/null || true",
+            "",
+        ])
+
+        # Volume mounts
+        for spec in self._config.volumes:
+            if not isinstance(spec, str) or ":" not in spec:
+                continue
+            parts = spec.split(":")
+            host_path = parts[0]
+            container_path = parts[1] if len(parts) > 1 else "/"
+            mode = parts[2] if len(parts) > 2 else "rw"
+            target = f"{merged}/{container_path.lstrip('/')}"
+            lines.append(f"mkdir -p {target}")
+            if mode == "cow":
+                safe = container_path.replace("/", "_").strip("_")
+                cow_upper = self._env_dir / f"cow_{safe}_upper"
+                cow_work = self._env_dir / f"cow_{safe}_work"
+                cow_upper.mkdir(parents=True, exist_ok=True)
+                cow_work.mkdir(parents=True, exist_ok=True)
+                lines.append(
+                    f"mount -t overlay overlay "
+                    f"-o lowerdir={host_path},upperdir={cow_upper},"
+                    f"workdir={cow_work} {target}"
+                )
+            else:
+                lines.append(f"mount --bind {host_path} {target}")
+                if mode == "ro":
+                    lines.append(f"mount -o remount,ro,bind {target}")
+
+        # Enter chroot
+        lines.extend([
+            "",
+            f"exec chroot {merged} {shell}{norc}",
+        ])
+
+        script_path = self._env_dir / "setup.sh"
+        script_path.write_text("\n".join(lines) + "\n")
+        script_path.chmod(0o755)
+        return script_path
+
+    def _write_seccomp_helper_userns(self) -> None:
+        """Write seccomp helper to upper_dir (visible inside chroot via overlay)."""
+        import inspect
+        from agentdocker_lite import security
+
+        src = inspect.getsource(security)
+        helper = (
+            "#!/usr/bin/env python3\n"
+            "# Auto-generated seccomp helper\n"
+            + src
+            + "\napply_seccomp_filter()\n"
+        )
+        target = self._upper_dir / "tmp" / ".adl_seccomp.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(helper)
+        target.chmod(0o755)
+
+    @staticmethod
+    def _check_prerequisites_userns() -> None:
+        """Check user namespace prerequisites."""
+        if shutil.which("unshare") is None:
+            raise FileNotFoundError(
+                "unshare not found. Install util-linux: apt-get install util-linux"
+            )
+        # Test if user namespaces actually work
+        result = subprocess.run(
+            ["unshare", "--user", "--map-root-user", "true"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "User namespaces are not available. Possible fixes:\n"
+                "  sysctl -w kernel.unprivileged_userns_clone=1\n"
+                "  sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
+                f"Error: {result.stderr.decode().strip()}"
+            )
+
+    # ------------------------------------------------------------------ #
     #  Public API -- reset / delete                                        #
     # ------------------------------------------------------------------ #
 
@@ -176,32 +428,51 @@ class NamespaceSandbox(SandboxBase):
         This is the RL fast-path: ~27ms for overlayfs, ~28ms for btrfs.
         """
         self._bg_handles.clear()
-
         t0 = time.monotonic()
 
         self._persistent_shell.kill()
-        self._unmount_binds()
 
-        if self._fs_backend == "btrfs":
-            self._reset_btrfs()
+        if self._userns:
+            # Mount namespace died with shell -- mounts auto-cleaned.
+            # Clear upper/work on host filesystem.
+            # The kernel's overlayfs creates work/work with 000 perms;
+            # fix permissions before rmtree.
+            for d in (self._upper_dir, self._work_dir):
+                if d and d.exists():
+                    # Overlayfs kernel creates work/work with 000 perms.
+                    # Fix permissions so rmtree can delete.
+                    for child in d.iterdir():
+                        try:
+                            child.chmod(0o700)
+                        except OSError:
+                            pass
+                    shutil.rmtree(d)
+                if d:
+                    d.mkdir(parents=True)
+
+            # Re-create working dir in upper
+            if self._config.working_dir and self._config.working_dir != "/":
+                wd = self._upper_dir / self._config.working_dir.lstrip("/")
+                wd.mkdir(parents=True, exist_ok=True)
+
+            # Re-write seccomp helper to upper
+            if self._config.seccomp:
+                self._write_seccomp_helper_userns()
         else:
-            self._reset_overlayfs()
-
-        self._apply_config_volumes()
-
-        if self._config.working_dir and self._config.working_dir != "/":
-            wd = self._rootfs / self._config.working_dir.lstrip("/")
-            wd.mkdir(parents=True, exist_ok=True)
+            self._unmount_binds()
+            if self._fs_backend == "btrfs":
+                self._reset_btrfs()
+            else:
+                self._reset_overlayfs()
+            self._apply_config_volumes()
+            if self._config.working_dir and self._config.working_dir != "/":
+                wd = self._rootfs / self._config.working_dir.lstrip("/")
+                wd.mkdir(parents=True, exist_ok=True)
 
         self._persistent_shell.start()
 
         elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.debug(
-            "Environment reset (%.3fms fs=%s): %s",
-            elapsed_ms,
-            self._fs_backend,
-            self._env_dir,
-        )
+        logger.debug("Environment reset (%.3fms): %s", elapsed_ms, self._env_dir)
 
     def delete(self) -> None:
         """Delete the sandbox and clean up all resources."""
@@ -209,27 +480,30 @@ class NamespaceSandbox(SandboxBase):
 
         self._persistent_shell.kill()
 
-        self._unmount_all()
-
-        if self._fs_backend == "btrfs" and self._btrfs_active:
-            subprocess.run(
-                ["btrfs", "subvolume", "delete", str(self._rootfs)],
-                capture_output=True,
-            )
-            self._btrfs_active = False
-
-        self._cleanup_cgroup()
+        if not self._userns:
+            self._unmount_all()
+            if self._fs_backend == "btrfs" and self._btrfs_active:
+                subprocess.run(
+                    ["btrfs", "subvolume", "delete", str(self._rootfs)],
+                    capture_output=True,
+                )
+                self._btrfs_active = False
+            self._cleanup_cgroup()
 
         if self._env_dir.exists():
+            # Fix 000-perm dirs left by overlayfs kernel in userns mode
+            if self._userns and self._work_dir and self._work_dir.exists():
+                for child in self._work_dir.iterdir():
+                    try:
+                        child.chmod(0o700)
+                    except OSError:
+                        pass
             shutil.rmtree(self._env_dir, ignore_errors=True)
 
+        self._unregister(self)
+
         elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info(
-            "Deleted sandbox (%.1fms fs=%s): %s",
-            elapsed_ms,
-            self._fs_backend,
-            self._env_dir,
-        )
+        logger.info("Deleted sandbox (%.1fms): %s", elapsed_ms, self._env_dir)
 
     # ------------------------------------------------------------------ #
     #  Auto rootfs preparation                                             #
@@ -258,7 +532,7 @@ class NamespaceSandbox(SandboxBase):
         if cached_rootfs.exists() and cached_rootfs.is_dir():
             logger.info("Using cached rootfs for %s: %s", image, cached_rootfs)
             if fs_backend == "btrfs":
-                NamespaceSandbox._verify_btrfs_subvolume(cached_rootfs)
+                RootfulSandbox._verify_btrfs_subvolume(cached_rootfs)
             return cached_rootfs
 
         lock_path = rootfs_cache_dir / f".{safe_name}.lock"
@@ -269,7 +543,7 @@ class NamespaceSandbox(SandboxBase):
                 if cached_rootfs.exists() and cached_rootfs.is_dir():
                     logger.info("Rootfs prepared by another worker: %s", cached_rootfs)
                     if fs_backend == "btrfs":
-                        NamespaceSandbox._verify_btrfs_subvolume(cached_rootfs)
+                        RootfulSandbox._verify_btrfs_subvolume(cached_rootfs)
                     return cached_rootfs
 
                 t0 = time.monotonic()
@@ -705,3 +979,35 @@ class NamespaceSandbox(SandboxBase):
         if self._host_path("/bin/bash").exists():
             return "/bin/bash"
         return "/bin/sh"
+
+    # ------------------------------------------------------------------ #
+    #  Userns file I/O: manual overlay (upper dir + base rootfs)           #
+    # ------------------------------------------------------------------ #
+
+    def _host_path(self, container_path: str) -> Path:
+        """Resolve container_path for reads.
+
+        In userns mode, check upper dir (modified files) first, then
+        fall back to base rootfs (original image files).
+        """
+        if self._userns:
+            stripped = container_path.lstrip("/")
+            upper = self._upper_dir / stripped
+            if upper.exists():
+                return upper
+            base = self._base_rootfs / stripped
+            if base.exists():
+                return base
+            # Return upper as default (caller checks existence)
+            return upper
+        return self._rootfs / container_path.lstrip("/")
+
+    def _host_path_write(self, container_path: str) -> Path:
+        """Resolve container_path for writes.
+
+        In userns mode, always write to the upper dir so the overlay
+        picks up the change.
+        """
+        if self._userns:
+            return self._upper_dir / container_path.lstrip("/")
+        return self._rootfs / container_path.lstrip("/")

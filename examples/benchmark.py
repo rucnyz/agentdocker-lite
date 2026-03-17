@@ -2,10 +2,10 @@
 """Benchmark: agentdocker-lite vs Docker lifecycle and command performance.
 
 Usage:
-    sudo python examples/benchmark.py
+    python examples/benchmark.py
 
 Runs identical operations on both backends and prints a comparison table.
-Requires Docker daemon running and root privileges.
+Requires Docker daemon running. No root required.
 """
 
 import subprocess

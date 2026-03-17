@@ -39,6 +39,8 @@ class SandboxConfig:
         fs_backend: Filesystem backend: ``"overlayfs"`` (default) or ``"btrfs"``.
         env_base_dir: Base directory for per-sandbox state.
         rootfs_cache_dir: Directory to cache auto-prepared rootfs images.
+            Defaults to ``$XDG_CACHE_HOME/agentdocker_lite/rootfs``
+            (typically ``~/.cache/agentdocker_lite/rootfs``).
         cpu_max: cgroup v2 ``cpu.max`` value (e.g. ``"50000 100000"``).
         memory_max: cgroup v2 ``memory.max`` value in bytes.
         pids_max: cgroup v2 ``pids.max`` value.
@@ -65,7 +67,7 @@ class SandboxConfig:
     devices: list[str] = field(default_factory=list)
     fs_backend: str = "overlayfs"
     env_base_dir: str = "/tmp/agentdocker_lite"
-    rootfs_cache_dir: str = "/tmp/agentdocker_lite_rootfs_cache"
+    rootfs_cache_dir: str = ""  # resolved in __post_init__
     cpu_max: Optional[str] = None
     memory_max: Optional[str] = None
     pids_max: Optional[str] = None
@@ -75,6 +77,12 @@ class SandboxConfig:
     landlock_read: Optional[list[str]] = None
     landlock_write: Optional[list[str]] = None
     landlock_tcp_ports: Optional[list[int]] = None
+
+    def __post_init__(self) -> None:
+        if not self.rootfs_cache_dir:
+            # Use XDG_CACHE_HOME (~/.cache) on disk instead of /tmp (tmpfs).
+            cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+            self.rootfs_cache_dir = os.path.join(cache_home, "agentdocker_lite", "rootfs")
 
 
 # ====================================================================== #
@@ -90,6 +98,37 @@ class SandboxBase(abc.ABC):
     ``reset()`` and ``delete()`` as well as their own ``__init__``.
     """
 
+    # -- global registry for atexit cleanup -------------------------------- #
+    _live_instances: list[SandboxBase] = []
+    _atexit_registered: bool = False
+
+    @classmethod
+    def _register(cls, instance: SandboxBase) -> None:
+        """Track a live sandbox for atexit cleanup."""
+        cls._live_instances.append(instance)
+        if not cls._atexit_registered:
+            import atexit
+            atexit.register(cls._atexit_cleanup)
+            cls._atexit_registered = True
+
+    @classmethod
+    def _unregister(cls, instance: SandboxBase) -> None:
+        """Remove a sandbox from the live registry."""
+        try:
+            cls._live_instances.remove(instance)
+        except ValueError:
+            pass
+
+    @classmethod
+    def _atexit_cleanup(cls) -> None:
+        """Delete all live sandboxes on process exit."""
+        for sb in list(cls._live_instances):
+            try:
+                sb.delete()
+            except Exception:
+                pass
+        cls._live_instances.clear()
+
     # -- attributes set by subclass __init__ ------------------------------- #
     _config: SandboxConfig
     _name: str
@@ -99,7 +138,7 @@ class SandboxBase(abc.ABC):
     _cached_env: dict[str, str]
     _persistent_shell: _PersistentShell
     _bg_handles: dict[str, str]
-    _rootless: bool
+    _userns: bool
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -239,11 +278,37 @@ class SandboxBase(abc.ABC):
         else:
             cmd_args = ["bash", "-c", command]
 
-        if self._rootless:
-            full_cmd = cmd_args
-            popen_cwd = str(self._rootfs)
+        shell_pid = self._persistent_shell._process.pid
+
+        if getattr(self, "_userns", False):
+            # User namespace mode: use os.setns() in preexec_fn to enter
+            # namespaces directly.  Avoids nsenter's setgroups() issue
+            # (user namespaces require setgroups=deny, but nsenter calls it).
+            _rootfs = str(self._rootfs)
+            _wd = self._config.working_dir or "/"
+
+            def _userns_preexec() -> None:
+                # Enter user namespace first (grants all capabilities)
+                with open(f"/proc/{shell_pid}/ns/user") as f:
+                    os.setns(f.fileno(), 0)
+                # Enter mount namespace (overlayfs visible here)
+                with open(f"/proc/{shell_pid}/ns/mnt") as f:
+                    os.setns(f.fileno(), 0)
+                # Chroot + chdir into the sandbox
+                os.chroot(_rootfs)
+                os.chdir(_wd)
+
+            defaults = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "env": self._cached_env,
+            }
+            defaults.update(kwargs)
+
+            proc = subprocess.Popen(cmd_args, preexec_fn=_userns_preexec, **defaults)
         else:
-            shell_pid = self._persistent_shell._process.pid
+            # Rootful mode: use nsenter + chroot.
             full_cmd = [
                 "nsenter",
                 f"--target={shell_pid}",
@@ -252,30 +317,25 @@ class SandboxBase(abc.ABC):
                 "--",
                 "chroot", str(self._rootfs),
             ] + cmd_args
-            popen_cwd = None
 
-        defaults = {
-            "stdin": subprocess.PIPE,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.PIPE,
-            "env": self._cached_env,
-        }
-        if popen_cwd:
-            defaults["cwd"] = popen_cwd
-        defaults.update(kwargs)
+            defaults = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "env": self._cached_env,
+            }
+            defaults.update(kwargs)
 
-        proc = subprocess.Popen(full_cmd, **defaults)
-        logger.debug(
-            "popen pid=%d in sandbox (rootless=%s): %s",
-            proc.pid, self._rootless, cmd_args,
-        )
+            proc = subprocess.Popen(full_cmd, **defaults)
+
+        logger.debug("popen pid=%d in sandbox: %s", proc.pid, cmd_args)
         return proc
 
     # -- file operations --------------------------------------------------- #
 
     def copy_to(self, local_path: str, container_path: str) -> None:
         """Copy a file from host into the sandbox."""
-        host_dst = self._host_path(container_path)
+        host_dst = self._host_path_write(container_path)
         host_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local_path, str(host_dst))
 
@@ -300,7 +360,7 @@ class SandboxBase(abc.ABC):
 
     def write_file(self, container_path: str, content: str | bytes) -> None:
         """Write content to a file inside the sandbox."""
-        host_path = self._host_path(container_path)
+        host_path = self._host_path_write(container_path)
         host_path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, bytes):
             host_path.write_bytes(content)
@@ -329,6 +389,15 @@ class SandboxBase(abc.ABC):
     # ------------------------------------------------------------------ #
 
     def _host_path(self, container_path: str) -> Path:
+        """Resolve container_path to host filesystem (for reads)."""
+        return self._rootfs / container_path.lstrip("/")
+
+    def _host_path_write(self, container_path: str) -> Path:
+        """Resolve container_path to host filesystem (for writes).
+
+        Overridden in RootfulSandbox/RootlessSandbox to write to the
+        overlay upper dir in user namespace mode.
+        """
         return self._rootfs / container_path.lstrip("/")
 
     def _build_env(self) -> dict[str, str]:
@@ -348,13 +417,13 @@ class SandboxBase(abc.ABC):
         try:
             if hasattr(self, "_persistent_shell"):
                 self._persistent_shell.kill()
-            if not getattr(self, "_rootless", False):
+            if not getattr(self, "_userns", False):
                 self._unmount_all()
         except Exception:
             pass
 
     def _unmount_all(self):
-        """Default no-op; overridden in NamespaceSandbox."""
+        """Default no-op; overridden in RootfulSandbox."""
         pass
 
     def __repr__(self) -> str:
