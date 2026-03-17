@@ -15,6 +15,10 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
+      - name: Enable unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: python -m pytest tests/test_security.py -v -k "UserNamespace"
 
   root:
