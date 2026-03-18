@@ -210,6 +210,7 @@ All security features are **on by default** with zero runtime overhead.
 - **Masked paths**: `/proc/kcore`, `/proc/keys`, `/proc/timer_list`, `/proc/sched_debug`, `/sys/firmware`, `/proc/scsi` bound to `/dev/null`
 - **Read-only paths**: `/proc/bus`, `/proc/fs`, `/proc/irq`, `/proc/sys`, `/proc/sysrq-trigger`
 - **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps)
+- **Time namespace**: isolates monotonic/boottime clocks, ensures CRIU restore sees continuous time (kernel 5.6+)
 
 ### Landlock (filesystem + network restrictions)
 
@@ -260,7 +261,8 @@ Active kernel features are auto-detected at creation and accessible via `sb.feat
 sb = Sandbox(config, name="worker-0")
 print(sb.features)
 # {'pidfd': True, 'cgroup_v2': True, 'seccomp': True, 'netns': False,
-#  'cpuset_cpus': None, 'oom_score_adj': None, 'mask_paths': True, 'cap_drop': True}
+#  'timens': True, 'cpuset_cpus': None, 'oom_score_adj': None,
+#  'mask_paths': True, 'cap_drop': True}
 ```
 
 ## Performance

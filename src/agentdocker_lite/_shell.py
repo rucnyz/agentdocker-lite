@@ -120,7 +120,11 @@ class _PersistentShell:
             # pivot_root changes the mount namespace root, unlike chroot
             # which only changes the process root.  CRIU requires these
             # to match for checkpoint/restore to work.
-            cmd = ["unshare", "--pid", "--mount", "--uts", "--ipc", "--time"]
+            cmd = ["unshare", "--pid", "--mount", "--uts", "--ipc"]
+            # Time namespace for CRIU monotonic clock continuity.
+            self._timens = os.path.exists("/proc/self/ns/time")
+            if self._timens:
+                cmd.append("--time")
             if self._net_isolate:
                 cmd.append("--net")
             shell_exec = self._shell
