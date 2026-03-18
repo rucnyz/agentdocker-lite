@@ -108,6 +108,8 @@ static void _main(long argc, char **argv, char **envp) {
     sc2(NR_symlink, (long)"/proc/self/fd/1", (long)"/dev/stdout");
     sc2(NR_symlink, (long)"/proc/self/fd/2", (long)"/dev/stderr");
     sc2(NR_mkdir, (long)"/dev/pts", 0755);
+    sc5(NR_mount, (long)"devpts", (long)"/dev/pts", (long)"devpts", MS_NOSUID, (long)"newinstance,ptmxmode=0666");
+    sc2(NR_symlink, (long)"pts/ptmx", (long)"/dev/ptmx");
     sc2(NR_mkdir, (long)"/dev/shm", 01777);
 
     /* 2. Drop capabilities */
