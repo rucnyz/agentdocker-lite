@@ -260,6 +260,21 @@ class SandboxBase(abc.ABC):
             running = False
         return output, running
 
+    def list_background(self) -> dict[str, dict]:
+        """List all background processes and their status.
+
+        Returns a dict mapping handle to ``{"pid": str, "running": bool}``.
+        """
+        result = {}
+        for handle, pid in self._bg_handles.items():
+            if pid:
+                _, ec = self.run(f"kill -0 {pid} 2>/dev/null")
+                running = ec == 0
+            else:
+                running = False
+            result[handle] = {"pid": pid, "running": running}
+        return result
+
     def stop_background(self, handle: str) -> str:
         """Stop a background process and return its final output."""
         out_file = f"/tmp/.bg_{handle}.out"
