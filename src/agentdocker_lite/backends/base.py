@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 # ====================================================================== #
 
 
+def _parse_size(value: str) -> str:
+    """Parse human-readable size to bytes string.
+
+    Supports: "512m", "2g", "1.5G", "4096", "536870912".
+    Returns the value as a string of bytes for cgroup writes.
+    """
+    value = value.strip()
+    if not value:
+        return value
+    suffixes = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    last = value[-1].lower()
+    if last in suffixes:
+        return str(int(float(value[:-1]) * suffixes[last]))
+    return value
+
+
 @dataclass
 class SandboxConfig:
     """Configuration for a sandbox instance.
@@ -99,9 +115,11 @@ class SandboxConfig:
 
     def __post_init__(self) -> None:
         if not self.rootfs_cache_dir:
-            # Use XDG_CACHE_HOME (~/.cache) on disk instead of /tmp (tmpfs).
             cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
             self.rootfs_cache_dir = os.path.join(cache_home, "agentdocker_lite", "rootfs")
+        # Parse human-readable sizes (e.g. "512m", "2g") to bytes.
+        if self.memory_max:
+            self.memory_max = _parse_size(self.memory_max)
 
 
 # ====================================================================== #

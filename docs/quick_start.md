@@ -86,7 +86,7 @@ sb.stop_background(handle)
 config = SandboxConfig(
     image="ubuntu:22.04",
     cpu_max="50000 100000",    # 50% of one CPU
-    memory_max="536870912",    # 512MB
+    memory_max="512m",         # 512MB (also accepts "2g", "536870912")
     pids_max="256",
     io_max="/dev/sda 10485760",  # 10MB/s write limit
     cpuset_cpus="0-3",           # pin to CPU 0-3
@@ -304,7 +304,7 @@ No root required (except CRIU checkpoint). Reproduce: `python examples/benchmark
 | `-v /host:/container:ro` | `volumes=["/host:/container:ro"]` |
 | `-v /host:/container:rw` | `volumes=["/host:/container:rw"]` |
 | *(no equivalent)* | `volumes=["/host:/container:cow"]` |
-| `--memory 512m` | `memory_max="536870912"` |
+| `--memory 512m` | `memory_max="512m"` |
 | `--cpus 0.5` | `cpu_max="50000 100000"` |
 | `--pids-limit 256` | `pids_max="256"` |
 | `--device-write-bps /dev/sda:10mb` | `io_max="/dev/sda 10485760"` |

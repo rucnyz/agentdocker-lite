@@ -16,7 +16,7 @@ def main():
         image="ubuntu:22.04",
         working_dir="/workspace",
         cpu_max="50000 100000",  # 50% of one core
-        memory_max="536870912",  # 512 MB
+        memory_max="512m",       # 512 MB
         pids_max="256",
         cpuset_cpus="0-1",       # pin to CPU 0-1
         oom_score_adj=500,       # prefer killing sandbox over host
