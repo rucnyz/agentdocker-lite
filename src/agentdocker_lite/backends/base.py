@@ -345,14 +345,17 @@ class SandboxBase(abc.ABC):
 
             proc = subprocess.Popen(cmd_args, preexec_fn=_userns_preexec, **defaults)
         else:
-            # Rootful mode: use nsenter + chroot.
+            # Rootful mode: use nsenter into the sandbox's namespaces.
+            # After pivot_root, the mount namespace root IS the rootfs,
+            # so no chroot is needed — just enter the namespace.
             full_cmd = [
                 "nsenter",
                 f"--target={shell_pid}",
                 "--pid",
                 "--mount",
+                "--root",
+                "--wd=/",
                 "--",
-                "chroot", str(self._rootfs),
             ] + cmd_args
 
             defaults = {

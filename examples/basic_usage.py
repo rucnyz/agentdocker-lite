@@ -5,13 +5,19 @@ Must be run as root (requires mount/cgroup operations).
 Requires Docker to auto-prepare rootfs from image names.
 """
 
+import os
 import shutil
+import tempfile
 
 from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
 
 
 def main():
     # ---- Create sandbox with resource limits + security hardening ----
+    host_dir = tempfile.mkdtemp(prefix="adl_demo_vol_")
+    with open(os.path.join(host_dir, "host_file.txt"), "w") as f:
+        f.write("from host\n")
+
     config = SandboxConfig(
         image="ubuntu:22.04",
         working_dir="/workspace",
@@ -20,6 +26,9 @@ def main():
         pids_max="256",
         cpuset_cpus="0-1",       # pin to CPU 0-1
         oom_score_adj=500,       # prefer killing sandbox over host
+        volumes=[
+            f"{host_dir}:/mnt/shared:ro",   # read-only bind mount
+        ],
         # Security: seccomp, masked paths, readonly paths, cap drop
         # are all ON by default — no config needed.
     )
@@ -40,6 +49,27 @@ def main():
     sb.write_file("/workspace/test.txt", "hello world\n")
     content = sb.read_file("/workspace/test.txt")
     print(f"File content: {content.strip()}")
+
+    # ---- Volumes ----
+    output, ec = sb.run("cat /mnt/shared/host_file.txt")
+    print(f"Volume (ro): {output.strip()}")
+    output, ec = sb.run("touch /mnt/shared/test 2>&1")
+    print(f"Volume write (should fail): exit={ec}")
+
+    # ---- Background processes ----
+    handle = sb.run_background("sleep 100")
+    output, running = sb.check_background(handle)
+    print(f"Background: running={running}")
+    sb.stop_background(handle)
+    print("Background process stopped")
+
+    # ---- Interactive processes (popen) ----
+    proc = sb.popen("bash")
+    proc.stdin.write(b"echo popen_works\n")
+    proc.stdin.flush()
+    line = proc.stdout.readline()
+    print(f"popen: {line.decode().strip()}")
+    proc.terminate()
 
     # ---- Filesystem snapshot/restore (no root required) ----
     sb.run("echo snapshot_v1 > /workspace/data.txt")
@@ -92,6 +122,7 @@ def main():
 
     # ---- Clean up ----
     sb.delete()
+    shutil.rmtree(host_dir, ignore_errors=True)
     print("Done.")
 
 
