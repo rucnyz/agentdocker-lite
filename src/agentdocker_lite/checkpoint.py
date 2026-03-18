@@ -233,6 +233,17 @@ class CheckpointManager:
                 "(CRIU needs CAP_CHECKPOINT_RESTORE + CAP_SYS_PTRACE)"
             )
 
+        # Become a subreaper so CRIU-restored processes (whose parent
+        # is the exited criu swrk) get reparented to us instead of
+        # init.  This lets waitpid work and avoids zombies.
+        import ctypes
+        import ctypes.util
+        PR_SET_CHILD_SUBREAPER = 36
+        _libc_name = ctypes.util.find_library("c")
+        if _libc_name:
+            _libc = ctypes.CDLL(_libc_name, use_errno=True)
+            _libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+
     def save(
         self,
         path: str,
@@ -613,20 +624,23 @@ class _RestoredProcess:
     def poll(self) -> Optional[int]:
         if self._dead:
             return -1
-        # pidfd says alive even for zombies (no parent to reap).
-        # Check /proc/<pid>/status to detect zombie state.
-        if self._pidfd is not None:
-            from agentdocker_lite._pidfd import pidfd_is_alive
-            if not pidfd_is_alive(self._pidfd):
-                self._dead = True
-                return -1
-            # Still "alive" per pidfd — check if zombie.
-            try:
-                status = Path(f"/proc/{self.pid}/status").read_text()
-                if "\nState:\tZ" in status:
+        # With subreaper, the restored process is our adopted child,
+        # so waitpid works normally.
+        try:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid == 0:
+                return None
+            self._dead = True
+            return os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
+        except ChildProcessError:
+            # Not our child (subreaper not set or race) — fallback to pidfd.
+            if self._pidfd is not None:
+                from agentdocker_lite._pidfd import pidfd_is_alive
+                if not pidfd_is_alive(self._pidfd):
                     self._dead = True
                     return -1
-            except OSError:
+                return None
+            if not Path(f"/proc/{self.pid}").exists():
                 self._dead = True
                 return -1
             return None
