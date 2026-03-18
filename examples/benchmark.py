@@ -69,6 +69,65 @@ def bench_docker() -> dict:
     }
 
 
+def bench_docker_throughput() -> dict:
+    """1000 sequential docker exec commands."""
+    N = 1000
+    # Ensure container is running
+    subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True)
+    subprocess.run(
+        ["docker", "run", "-d", "--name", CONTAINER_NAME, IMAGE, "sleep", "infinity"],
+        capture_output=True, check=True,
+    )
+    t0 = time.monotonic()
+    for i in range(N):
+        _docker_run(f"echo {i}")
+    elapsed = time.monotonic() - t0
+    subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True)
+    return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+
+def bench_docker_reset_loop() -> dict:
+    """exec → rm+run (reset) 100 times."""
+    N = 100
+    t0 = time.monotonic()
+    for i in range(N):
+        subprocess.run(
+            ["docker", "run", "-d", "--name", CONTAINER_NAME, IMAGE, "sleep", "infinity"],
+            capture_output=True, check=True,
+        )
+        _docker_run(f"echo episode-{i}")
+        subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True)
+    elapsed = time.monotonic() - t0
+    return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+
+def bench_docker_concurrent() -> dict:
+    """Parallel docker containers — 10 cmds each."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    results = {}
+    for n in [4, 8, 16]:
+        def worker(i):
+            name = f"adl-bench-docker-par-{i}"
+            subprocess.run(
+                ["docker", "run", "-d", "--name", name, IMAGE, "sleep", "infinity"],
+                capture_output=True, check=True,
+            )
+            for j in range(10):
+                subprocess.run(
+                    ["docker", "exec", name, "bash", "-c", f"echo {j}"],
+                    capture_output=True,
+                )
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            list(pool.map(worker, range(n)))
+        elapsed = time.monotonic() - t0
+        results[n] = {"total_s": elapsed, "cmds_per_sec": n * 10 / elapsed}
+    return results
+
+
 # ---------------------------------------------------------------------------
 # agentdocker-lite
 # ---------------------------------------------------------------------------
@@ -162,6 +221,118 @@ def bench_criu() -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Sustained workload benchmarks
+# ---------------------------------------------------------------------------
+
+def bench_throughput() -> dict:
+    """1000 sequential commands — measures sustained throughput."""
+    from agentdocker_lite import Sandbox, SandboxConfig
+    N = 1000
+
+    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="adl-bench-tp")
+    t0 = time.monotonic()
+    for i in range(N):
+        sb.run(f"echo {i}")
+    elapsed = time.monotonic() - t0
+    sb.delete()
+
+    return {
+        "total_s": elapsed,
+        "ops_per_sec": N / elapsed,
+        "avg_ms": elapsed / N * 1000,
+    }
+
+
+def bench_reset_loop() -> dict:
+    """run → reset → run → reset 100 times — simulates RL episode resets."""
+    from agentdocker_lite import Sandbox, SandboxConfig
+    N = 100
+
+    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="adl-bench-reset")
+    t0 = time.monotonic()
+    for i in range(N):
+        sb.run(f"echo episode-{i} > /workspace/state.txt")
+        sb.reset()
+    elapsed = time.monotonic() - t0
+    sb.delete()
+
+    return {
+        "total_s": elapsed,
+        "cycles_per_sec": N / elapsed,
+        "avg_ms": elapsed / N * 1000,
+    }
+
+
+def bench_checkpoint_loop() -> dict | None:
+    """save → run → restore 50 times — simulates partial rollout."""
+    import os
+    import shutil
+
+    if os.geteuid() != 0:
+        return None
+
+    from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+
+    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="adl-bench-ckpt-loop")
+    if not CheckpointManager.check_available():
+        sb.delete()
+        return None
+
+    mgr = CheckpointManager(sb)
+    N = 50
+    ckpt = "/tmp/adl_bench_ckpt_loop"
+
+    sb.run("echo base_state > /workspace/data.txt")
+    shutil.rmtree(ckpt, ignore_errors=True)
+    mgr.save(ckpt)
+
+    t0 = time.monotonic()
+    for i in range(N):
+        sb.run(f"echo step-{i} >> /workspace/log.txt")
+        mgr.restore(ckpt)
+    elapsed = time.monotonic() - t0
+
+    sb.delete()
+    shutil.rmtree(ckpt, ignore_errors=True)
+
+    return {
+        "total_s": elapsed,
+        "cycles_per_sec": N / elapsed,
+        "avg_ms": elapsed / N * 1000,
+    }
+
+
+def bench_concurrent() -> dict:
+    """Parallel sandboxes — measures scalability."""
+    from concurrent.futures import ThreadPoolExecutor
+    from agentdocker_lite import Sandbox, SandboxConfig
+
+    results = {}
+    for n in [4, 8, 16]:
+        def worker(i):
+            sb = Sandbox(
+                SandboxConfig(image=IMAGE, working_dir="/workspace"),
+                name=f"adl-bench-par-{i}",
+            )
+            for j in range(10):
+                sb.run(f"echo {j}")
+            sb.delete()
+
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            list(pool.map(worker, range(n)))
+        elapsed = time.monotonic() - t0
+
+        total_cmds = n * 10
+        results[n] = {
+            "total_s": elapsed,
+            "cmds_per_sec": total_cmds / elapsed,
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -197,7 +368,7 @@ def main():
         speedup = d / s if s > 0 else float("inf")
         print(f"{label:20} {d:>10.1f}ms {s:>10.1f}ms {speedup:>9.1f}x")
 
-    # CRIU benchmark
+    # CRIU single-op benchmark
     print("\nRunning CRIU checkpoint benchmark...")
     criu = bench_criu()
     if criu:
@@ -205,6 +376,40 @@ def main():
         print(f"{'CRIU restore':20} {'—':>12} {criu['restore_ms']:>10.1f}ms {'—':>9}")
     else:
         print("CRIU not available (requires root + CRIU binary)")
+
+    # Sustained workloads
+    print("\n--- Sustained workloads ---\n")
+
+    print("Throughput (1000 sequential commands)...")
+    docker_tp = bench_docker_throughput()
+    adl_tp = bench_throughput()
+    speedup = adl_tp["ops_per_sec"] / docker_tp["ops_per_sec"]
+    print(f"  Docker: {docker_tp['ops_per_sec']:.0f} cmd/s  (avg {docker_tp['avg_ms']:.1f}ms)")
+    print(f"  adl:    {adl_tp['ops_per_sec']:.0f} cmd/s  (avg {adl_tp['avg_ms']:.1f}ms)  {speedup:.1f}x")
+
+    print("Reset loop (100 run+reset cycles)...")
+    docker_rl = bench_docker_reset_loop()
+    adl_rl = bench_reset_loop()
+    speedup = adl_rl["cycles_per_sec"] / docker_rl["cycles_per_sec"]
+    print(f"  Docker: {docker_rl['cycles_per_sec']:.1f} resets/s  (avg {docker_rl['avg_ms']:.0f}ms)")
+    print(f"  adl:    {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)  {speedup:.1f}x")
+
+    print("Checkpoint loop (50 run+restore cycles)...")
+    cl = bench_checkpoint_loop()
+    if cl:
+        print(f"  adl:    {cl['cycles_per_sec']:.1f} restores/s  (avg {cl['avg_ms']:.0f}ms)")
+        print("  (Docker checkpoint requires experimental daemon — not benchmarked)")
+    else:
+        print("  Skipped (requires root + CRIU)")
+
+    print("Concurrent sandboxes (4/8/16 parallel, 10 cmds each)...")
+    docker_conc = bench_docker_concurrent()
+    adl_conc = bench_concurrent()
+    for n in [4, 8, 16]:
+        d = docker_conc[n]
+        a = adl_conc[n]
+        speedup = a["cmds_per_sec"] / d["cmds_per_sec"]
+        print(f"  {n:2d}x: Docker {d['cmds_per_sec']:.0f} cmd/s | adl {a['cmds_per_sec']:.0f} cmd/s  {speedup:.1f}x")
 
 
 if __name__ == "__main__":
