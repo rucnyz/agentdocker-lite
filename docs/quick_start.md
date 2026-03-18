@@ -127,14 +127,7 @@ Full process-state checkpoint/restore: memory, registers, environment variables,
 
 **Zero runtime overhead** — CRIU only runs during save/restore, no interposition on normal exec.
 
-**Requirements**: `criu` >= 4.0, root.
-
-```bash
-# Install CRIU
-# Arch:   pacman -S criu
-# Ubuntu: apt install criu
-# Fedora: dnf install criu
-```
+**Requirements**: root (CRIU binary is bundled — no install needed).
 
 ```python
 from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
@@ -143,20 +136,20 @@ config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
 sb = Sandbox(config, name="worker-0")
 mgr = CheckpointManager(sb)
 
-# Set up some complex state
-sb.run("export MY_VAR=hello && cd /tmp && echo 'state v1' > progress.txt")
+# Set up state
+sb.run("echo 'state v1' > /workspace/data.txt")
 
-# Save full process state (filesystem + memory + env + cwd)
+# Save full process state (filesystem + memory + cwd)
 mgr.save("/tmp/ckpt_v1")
 # Sandbox keeps running — save() doesn't kill it (--leave-running)
 
-# Agent does more work...
-sb.run("rm -rf /workspace/* && echo 'state v2' > /tmp/progress.txt")
+# Agent does destructive work...
+sb.run("rm -rf /workspace/*")
 
-# Rollback: exact restore to checkpoint (env vars, cwd, everything)
+# Rollback: exact restore to checkpoint
 mgr.restore("/tmp/ckpt_v1")
 
-output, _ = sb.run("cat /tmp/progress.txt")
+output, _ = sb.run("cat /workspace/data.txt")
 print(output)  # "state v1\n" — fully restored
 
 sb.delete()

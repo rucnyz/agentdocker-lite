@@ -31,6 +31,7 @@ jobs:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
       - run: sudo -E $(which python) -m pytest tests/test_sandbox.py tests/test_security.py -v -k "not UserNamespace"
+      - run: sudo -E $(which python) -m pytest tests/test_checkpoint.py -v
 
   lint:
     name: Lint
