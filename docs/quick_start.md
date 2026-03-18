@@ -89,6 +89,8 @@ config = SandboxConfig(
     memory_max="536870912",    # 512MB
     pids_max="256",
     io_max="/dev/sda 10485760",  # 10MB/s write limit
+    cpuset_cpus="0-3",           # pin to CPU 0-3
+    oom_score_adj=500,           # prefer killing sandbox over host processes
 )
 ```
 
@@ -200,9 +202,14 @@ Device passthrough requires root. For rootless GPU access, consider mounting the
 
 ## Security hardening
 
-### seccomp-bpf (default: on)
+All security features are **on by default** with zero runtime overhead.
 
-Blocks 30+ dangerous syscalls: ptrace, mount, kexec, bpf, unshare, setns, etc.
+### Default protections (no configuration needed)
+
+- **seccomp-bpf**: blocks 30+ dangerous syscalls (ptrace, mount, kexec, bpf, unshare, setns, etc.)
+- **Masked paths**: `/proc/kcore`, `/proc/keys`, `/proc/timer_list`, `/proc/sched_debug`, `/sys/firmware`, `/proc/scsi` bound to `/dev/null`
+- **Read-only paths**: `/proc/bus`, `/proc/fs`, `/proc/irq`, `/proc/sys`, `/proc/sysrq-trigger`
+- **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps)
 
 ### Landlock (filesystem + network restrictions)
 
@@ -289,4 +296,6 @@ No root required (except CRIU checkpoint). Reproduce: `python examples/benchmark
 | `-e KEY=value` | `environment={"KEY": "value"}` |
 | `--device /dev/kvm` | `devices=["/dev/kvm"]` (root only) |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
+| `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
+| `--oom-score-adj 500` | `oom_score_adj=500` |
 | *(no equivalent)* | `landlock_read=[...], landlock_tcp_ports=[...]` |

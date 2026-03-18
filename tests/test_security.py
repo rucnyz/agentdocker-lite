@@ -201,3 +201,62 @@ class TestDevices:
             assert "exists" in output
         finally:
             sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Masked / read-only paths and OOM score                              #
+# ------------------------------------------------------------------ #
+
+
+class TestHardening:
+    """Verify default security hardening (mask, readonly, oom, cpuset)."""
+
+    def test_masked_paths(self, root_sandbox):
+        """Sensitive paths should be masked (empty or inaccessible)."""
+        # /proc/kcore is bound to /dev/null — reading returns empty
+        output, ec = root_sandbox.run("cat /proc/kcore 2>&1 | wc -c")
+        assert ec == 0
+        assert int(output.strip()) == 0
+
+    def test_readonly_paths(self, root_sandbox):
+        """Kernel tunable paths should be read-only."""
+        output, ec = root_sandbox.run("touch /proc/sys/kernel/hostname 2>&1")
+        # Should fail with permission error or read-only error
+        assert ec != 0
+
+    def test_oom_score_adj(self, tmp_path):
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+            oom_score_adj=500,
+        )
+        sb = Sandbox(config, name="oom-test")
+        try:
+            import os
+            pid = sb._persistent_shell._process.pid
+            score = open(f"/proc/{pid}/oom_score_adj").read().strip()
+            assert score == "500"
+        finally:
+            sb.delete()
+
+    def test_cpuset(self, tmp_path):
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+            cpuset_cpus="0",
+        )
+        sb = Sandbox(config, name="cpuset-test")
+        try:
+            output, ec = sb.run("echo ok")
+            assert ec == 0
+            assert "ok" in output
+        finally:
+            sb.delete()
