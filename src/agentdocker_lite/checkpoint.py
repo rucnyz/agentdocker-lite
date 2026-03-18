@@ -604,16 +604,32 @@ class _RestoredProcess:
 
     def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
         self.pid = pid
+        self._dead = False
         from agentdocker_lite._pidfd import pidfd_open
         self._pidfd: Optional[int] = pidfd_open(pid)
         self.stdin = os.fdopen(stdin_fd, "wb", buffering=0) if stdin_fd >= 0 else None
         self.stdout = os.fdopen(stdout_fd, "rb", buffering=0) if stdout_fd >= 0 else None
 
     def poll(self) -> Optional[int]:
-        # pidfd-based liveness check (race-free, works for non-child processes).
+        if self._dead:
+            return -1
+        # pidfd says alive even for zombies (no parent to reap).
+        # Check /proc/<pid>/status to detect zombie state.
         if self._pidfd is not None:
             from agentdocker_lite._pidfd import pidfd_is_alive
-            return None if pidfd_is_alive(self._pidfd) else -1
+            if not pidfd_is_alive(self._pidfd):
+                self._dead = True
+                return -1
+            # Still "alive" per pidfd — check if zombie.
+            try:
+                status = Path(f"/proc/{self.pid}/status").read_text()
+                if "\nState:\tZ" in status:
+                    self._dead = True
+                    return -1
+            except OSError:
+                self._dead = True
+                return -1
+            return None
         # Fallback to waitpid / /proc check.
         try:
             pid, status = os.waitpid(self.pid, os.WNOHANG)
@@ -627,13 +643,17 @@ class _RestoredProcess:
 
     def kill(self) -> None:
         import signal
+        # Try kill single process first (restored process may not be
+        # a process group leader, so killpg can fail).
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         try:
             os.killpg(self.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        except (ProcessLookupError, PermissionError):
+            pass
+        self._dead = True
         if self._pidfd is not None:
             try:
                 os.close(self._pidfd)

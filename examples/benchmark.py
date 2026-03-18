@@ -110,6 +110,58 @@ def bench_sandbox() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# CRIU checkpoint/restore benchmark
+# ---------------------------------------------------------------------------
+
+N_CRIU_ITERS = 5
+
+def bench_criu() -> dict | None:
+    import os
+    import shutil
+
+    if os.geteuid() != 0:
+        return None
+
+    from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+
+    config = SandboxConfig(image=IMAGE, working_dir="/workspace")
+    sb = Sandbox(config, name="adl-bench-criu")
+
+    if not CheckpointManager.check_available():
+        sb.delete()
+        return None
+
+    mgr = CheckpointManager(sb)
+    sb.run("echo data > /workspace/test.txt")
+
+    # Save latency
+    save_times = []
+    for i in range(N_CRIU_ITERS):
+        ckpt = f"/tmp/adl_bench_ckpt_{i}"
+        shutil.rmtree(ckpt, ignore_errors=True)
+        t0 = time.monotonic()
+        mgr.save(ckpt)
+        save_times.append((time.monotonic() - t0) * 1000)
+
+    # Restore latency
+    restore_times = []
+    for i in range(N_CRIU_ITERS):
+        sb.run("echo modified > /workspace/test.txt")
+        t0 = time.monotonic()
+        mgr.restore(f"/tmp/adl_bench_ckpt_{i}")
+        restore_times.append((time.monotonic() - t0) * 1000)
+
+    sb.delete()
+    for i in range(N_CRIU_ITERS):
+        shutil.rmtree(f"/tmp/adl_bench_ckpt_{i}", ignore_errors=True)
+
+    return {
+        "save_ms": sum(save_times) / len(save_times),
+        "restore_ms": sum(restore_times) / len(restore_times),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -144,6 +196,15 @@ def main():
         s = sandbox[key]
         speedup = d / s if s > 0 else float("inf")
         print(f"{label:20} {d:>10.1f}ms {s:>10.1f}ms {speedup:>9.1f}x")
+
+    # CRIU benchmark
+    print("\nRunning CRIU checkpoint benchmark...")
+    criu = bench_criu()
+    if criu:
+        print(f"{'CRIU save':20} {'—':>12} {criu['save_ms']:>10.1f}ms {'—':>9}")
+        print(f"{'CRIU restore':20} {'—':>12} {criu['restore_ms']:>10.1f}ms {'—':>9}")
+    else:
+        print("CRIU not available (requires root + CRIU binary)")
 
 
 if __name__ == "__main__":
