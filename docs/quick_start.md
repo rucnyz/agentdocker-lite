@@ -96,6 +96,18 @@ config = SandboxConfig(
 
 Without root: applied via `systemd-run --user --scope`. With root: direct cgroup v2 writes.
 
+### Pressure monitoring (PSI)
+
+Identify CPU/memory/IO bottlenecks per sandbox — useful for large-scale RL training:
+
+```python
+psi = sb.pressure()
+# {'cpu': {'avg10': 45.0, 'avg60': 30.0, 'avg300': 20.0},
+#  'memory': {'avg10': 0.0, ...}, 'io': {'avg10': 12.5, ...}}
+if psi.get("cpu", {}).get("avg10", 0) > 50:
+    print(f"Sandbox {sb} is CPU-bottlenecked!")
+```
+
 ## Port mapping (pasta networking)
 
 ```python

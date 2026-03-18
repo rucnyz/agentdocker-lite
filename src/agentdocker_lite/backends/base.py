@@ -391,6 +391,44 @@ class SandboxBase(abc.ABC):
         """Path to the sandbox's rootfs on the host."""
         return self._rootfs
 
+    # -- cgroup pressure (PSI) --------------------------------------------- #
+
+    def pressure(self) -> dict[str, dict[str, float]]:
+        """Read cgroup v2 Pressure Stall Information for this sandbox.
+
+        Returns per-resource pressure as avg10/avg60/avg300 percentages::
+
+            {
+                "cpu":    {"avg10": 5.0, "avg60": 3.2, "avg300": 1.1},
+                "memory": {"avg10": 0.0, "avg60": 0.0, "avg300": 0.0},
+                "io":     {"avg10": 12.5, "avg60": 8.0, "avg300": 4.0},
+            }
+
+        Returns empty dict if cgroup v2 or PSI is not available.
+        """
+        cg = getattr(self, "_cgroup_path", None)
+        if not cg:
+            return {}
+        result: dict[str, dict[str, float]] = {}
+        for resource in ("cpu", "memory", "io"):
+            psi_file = cg / f"{resource}.pressure"
+            if not psi_file.exists():
+                continue
+            try:
+                # Parse "some avg10=X avg60=Y avg300=Z total=T" line.
+                line = psi_file.read_text().split("\n")[0]
+                vals: dict[str, float] = {}
+                for part in line.split():
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        if k.startswith("avg"):
+                            vals[k] = float(v)
+                if vals:
+                    result[resource] = vals
+            except (OSError, ValueError):
+                continue
+        return result
+
     # -- abstract methods -------------------------------------------------- #
 
     @abc.abstractmethod
