@@ -127,6 +127,10 @@ _BLOCKED_X86_64: dict[str, int] = {
     # I/O privilege (x86 only)
     "ioperm": 173,
     "iopl": 172,
+    # io_uring — operations execute in kernel threads, bypass seccomp entirely
+    "io_uring_setup": 425,
+    "io_uring_enter": 426,
+    "io_uring_register": 427,
     # clone3 — flags in struct, can't inspect from BPF
     "clone3": 435,
 }
@@ -159,6 +163,9 @@ _BLOCKED_AARCH64: dict[str, int] = {
     "keyctl": 219,
     "add_key": 217,
     "request_key": 218,
+    "io_uring_setup": 425,
+    "io_uring_enter": 426,
+    "io_uring_register": 427,
     "clone3": 435,
 }
 
