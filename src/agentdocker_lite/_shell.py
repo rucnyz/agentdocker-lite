@@ -16,15 +16,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Docker-default security paths (applied inside the namespace).
-_DEFAULT_MASKED_PATHS = [
-    "/proc/kcore", "/proc/keys", "/proc/timer_list",
-    "/proc/sched_debug", "/sys/firmware", "/proc/scsi",
-]
-_DEFAULT_READONLY_PATHS = [
-    "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys",
-    "/proc/sysrq-trigger",
-]
+# Docker-default masked/readonly paths are hardcoded in the adl-seccomp
+# static binary (_vendor/adl-seccomp.c) which applies them before exec.
 
 
 class _PersistentShell:
@@ -236,35 +229,19 @@ class _PersistentShell:
         self._signal_w = None
 
         # Initialize shell: disable prompts, cd to working dir, signal ready.
-        # In userns mode, /proc and /dev are already set up by the setup script
-        # before chroot.  In rootful mode, they're set up here (inside chroot).
-        # Security hardening: mask sensitive paths and make others read-only.
-        # Uses Docker-default lists. Applied after /proc and /dev are mounted.
-        _mask_snippet = ""
-        for p in _DEFAULT_MASKED_PATHS:
-            _mask_snippet += (
-                f"if [ -d {p} ]; then mount -t tmpfs tmpfs {p} 2>/dev/null; "
-                f"elif [ -e {p} ]; then mount --bind /dev/null {p} 2>/dev/null; fi\n"
-            )
-        _ro_snippet = ""
-        for p in _DEFAULT_READONLY_PATHS:
-            _ro_snippet += (
-                f"mount --bind {p} {p} 2>/dev/null && "
-                f"mount -o remount,ro,bind {p} 2>/dev/null\n"
-            )
-
+        # Security (mask/readonly/seccomp/cap-drop) is handled by adl-seccomp
+        # which runs before bash starts. Init script only does hostname + cd.
         _hostname_snippet = (
             f"hostname {shlex.quote(self._hostname)} 2>/dev/null\n"
             if self._hostname else ""
         )
 
         if self._userns:
-            # User namespace: setup script already did mount/dev/chroot.
-            # This runs inside the chroot bash (read from stdin pipe).
+            # User namespace: setup script handles mount/dev/chroot.
+            # adl-seccomp handles mask/readonly/cap-drop/seccomp.
+            # Init script only does hostname and cd.
             init_script = (
                 "PS1='' PS2=''\n"
-                + _mask_snippet
-                + _ro_snippet
                 + _hostname_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"

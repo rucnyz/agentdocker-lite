@@ -302,6 +302,20 @@ class RootfulSandbox(SandboxBase):
             wd = self._upper_dir / config.working_dir.lstrip("/")
             wd.mkdir(parents=True, exist_ok=True)
 
+        # --- write seccomp helper to upper dir (visible via overlayfs) ----
+        if config.seccomp:
+            from agentdocker_lite.security import build_seccomp_bpf
+            bpf_bytes = build_seccomp_bpf()
+            if bpf_bytes:
+                tmp_dir = self._upper_dir / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                vendor_dir = Path(__file__).parent.parent / "_vendor"
+                helper_src = vendor_dir / "adl-seccomp"
+                if helper_src.exists():
+                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
+
         # --- generate setup script ----------------------------------------
         self._shell = self._detect_shell()
         setup_script_path = self._generate_userns_setup_script()
@@ -442,11 +456,17 @@ class RootfulSandbox(SandboxBase):
                 if mode == "ro":
                     lines.append(f"mount -o remount,ro,bind {target}")
 
-        # Enter chroot
-        lines.extend([
-            "",
-            f"exec chroot {merged} {shell}{norc}",
-        ])
+        # Enter chroot — use adl-seccomp wrapper for cap drop + seccomp
+        if self._config.seccomp:
+            lines.extend([
+                "",
+                f"exec chroot {merged} /tmp/.adl_seccomp {shell}{norc}",
+            ])
+        else:
+            lines.extend([
+                "",
+                f"exec chroot {merged} {shell}{norc}",
+            ])
 
         script_path = self._env_dir / "setup.sh"
         script_path.write_text("\n".join(lines) + "\n")
