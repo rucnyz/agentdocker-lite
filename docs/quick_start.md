@@ -152,6 +152,24 @@ sb.fs_restore("/tmp/checkpoint_v1")     # restore to v1
 sb.reset()                           # back to clean image (not snapshot)
 ```
 
+## Save as Docker image
+
+Export the current sandbox state as a Docker image — works with both
+`docker run` and `SandboxConfig(image=...)`:
+
+```python
+sb = Sandbox(SandboxConfig(image="ubuntu:22.04"))
+sb.run("apt-get update && apt-get install -y python3")
+sb.save_as_image("my-app:with-python")
+sb.delete()
+
+# Later — instant start, no apt-get:
+sb2 = Sandbox(SandboxConfig(image="my-app:with-python"))
+
+# Also works with plain Docker:
+# docker run my-app:with-python python3 -c "print('hello')"
+```
+
 ## Process checkpointing (CRIU)
 
 Full process-state checkpoint/restore: memory, registers, environment variables, cwd — everything. Useful for partial rollout in RL training where agent trajectories need to continue from a previous state.

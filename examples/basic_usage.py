@@ -7,6 +7,7 @@ Requires Docker to auto-prepare rootfs from image names.
 
 import os
 import shutil
+import subprocess
 import tempfile
 
 from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
@@ -83,6 +84,17 @@ def main():
     output, _ = sb.run("cat /workspace/data.txt")
     print(f"After fs_restore: {output.strip()}")  # snapshot_v1
     shutil.rmtree("/tmp/adl_demo_snapshot", ignore_errors=True)
+
+    # ---- Save as Docker image ----
+    sb.run("echo image_data > /workspace/exported.txt")
+    sb.save_as_image("adl-demo:cached")
+    print("Saved sandbox state as Docker image: adl-demo:cached")
+
+    sb2 = Sandbox(SandboxConfig(image="adl-demo:cached", working_dir="/workspace"), name="from-cache")
+    out, _ = sb2.run("cat /workspace/exported.txt")
+    print(f"From cached image: {out.strip()}")  # image_data
+    sb2.delete()
+    subprocess.run(["docker", "rmi", "-f", "adl-demo:cached"], capture_output=True)
 
     # ---- CRIU process checkpoint/restore ----
     if CheckpointManager.check_available():

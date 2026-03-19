@@ -480,6 +480,25 @@ class TestFsSnapshot:
         assert ec != 0  # file gone after reset
 
 
+class TestSaveAsImage:
+    """Test save_as_image: export sandbox state as a Docker image."""
+
+    IMAGE_TAG = "adl-test-save:cached"
+
+    def test_save_and_load(self, sandbox):
+        sandbox.run("echo cached_data > /workspace/cached.txt")
+        sandbox.save_as_image(self.IMAGE_TAG)
+
+        try:
+            sb2 = Sandbox(SandboxConfig(image=self.IMAGE_TAG, working_dir="/workspace"), name="from-cache")
+            out, ec = sb2.run("cat /workspace/cached.txt")
+            assert ec == 0
+            assert "cached_data" in out
+            sb2.delete()
+        finally:
+            subprocess.run(["docker", "rmi", "-f", self.IMAGE_TAG], capture_output=True)
+
+
 # ------------------------------------------------------------------ #
 #  Volumes                                                             #
 # ------------------------------------------------------------------ #

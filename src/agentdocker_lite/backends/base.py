@@ -530,6 +530,51 @@ class SandboxBase(abc.ABC):
         ret = libc.syscall(SYS_PROCESS_MADVISE, pidfd, ctypes.byref(iov), 1, MADV_COLD, 0)
         return ret >= 0
 
+    # -- Docker image export ----------------------------------------------- #
+
+    def save_as_image(self, image_name: str) -> None:
+        """Save current sandbox state as a Docker image.
+
+        Tars the sandbox rootfs (base + all changes) and imports it via
+        ``docker import``.  The resulting image can be used with both
+        ``docker run`` and ``SandboxConfig(image=...)``.
+
+        Args:
+            image_name: Docker image name with optional tag
+                (e.g. ``"my-app:cached"``).
+
+        Example::
+
+            sb = Sandbox(SandboxConfig(image="ubuntu:22.04"))
+            sb.run("apt-get update && apt-get install -y python3")
+            sb.save_as_image("my-app:with-python")
+
+            # Later — fast start, no apt-get needed:
+            sb2 = Sandbox(SandboxConfig(image="my-app:with-python"))
+        """
+        rootfs = self._rootfs
+        if not rootfs or not rootfs.exists():
+            raise RuntimeError("No rootfs available to export")
+
+        tar_proc = subprocess.Popen(
+            ["tar", "-C", str(rootfs), "-c", "."],
+            stdout=subprocess.PIPE,
+        )
+        import_proc = subprocess.Popen(
+            ["docker", "import", "--change", "CMD /bin/sh", "-", image_name],
+            stdin=tar_proc.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if tar_proc.stdout is not None:
+            tar_proc.stdout.close()
+        _, stderr_bytes = import_proc.communicate()
+        stderr = (stderr_bytes or b"").decode(errors="replace")
+
+        if import_proc.returncode != 0:
+            raise RuntimeError(f"docker import failed: {stderr.strip()}")
+        logger.info("Saved sandbox as Docker image: %s", image_name)
+
     # -- abstract methods -------------------------------------------------- #
 
     @abc.abstractmethod
