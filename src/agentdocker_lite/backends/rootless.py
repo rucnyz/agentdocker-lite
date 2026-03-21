@@ -73,13 +73,29 @@ class RootlessSandbox(RootfulSandbox):
 
         # --- paths --------------------------------------------------------
         rootfs_cache_dir = Path(config.rootfs_cache_dir)
-        # Userns mode: flat rootfs (layer caching needs mknod → root only)
-        self._base_rootfs = self._resolve_flat_rootfs(
-            image=config.image,
-            rootfs_cache_dir=rootfs_cache_dir,
-        )
-        self._layer_dirs: list[Path] | None = None
-        self._lowerdir_spec = str(self._base_rootfs)
+        from agentdocker_lite.rootfs import _detect_whiteout_strategy
+        whiteout_strategy = _detect_whiteout_strategy()
+
+        if whiteout_strategy == "none":
+            logger.debug("Kernel too old for rootless layer cache, using flat rootfs")
+            self._base_rootfs = self._resolve_flat_rootfs(
+                image=config.image,
+                rootfs_cache_dir=rootfs_cache_dir,
+            )
+            self._layer_dirs: list[Path] | None = None
+            self._lowerdir_spec = str(self._base_rootfs)
+        else:
+            self._base_rootfs, self._layer_dirs = self._resolve_base_rootfs(
+                image=config.image,
+                rootfs_cache_dir=rootfs_cache_dir,
+                fs_backend="overlayfs",
+            )
+            if self._layer_dirs:
+                self._lowerdir_spec = ":".join(
+                    str(d) for d in reversed(self._layer_dirs)
+                )
+            else:
+                self._lowerdir_spec = str(self._base_rootfs)
 
         env_base = Path(config.env_base_dir)
         self._env_dir = env_base / name
@@ -207,6 +223,8 @@ class RootlessSandbox(RootfulSandbox):
 
         self.features: dict[str, object] = {
             "userns": True,
+            "layer_cache": self._layer_dirs is not None,
+            "whiteout": whiteout_strategy,
             "pidfd": self._persistent_shell._pidfd is not None,
             "seccomp": config.seccomp,
             "netns": config.net_isolate,
@@ -246,9 +264,10 @@ class RootlessSandbox(RootfulSandbox):
             f"chmod -R 700 {work} 2>/dev/null || true",
             f"rm -rf {work}/work 2>/dev/null || true",
             "",
-            "# Mount overlayfs",
-            f"mount -t overlay overlay "
-            f"-o lowerdir={self._lowerdir_spec},upperdir={upper},workdir={work} {merged}",
+            "# Mount overlayfs (LIBMOUNT_FORCE_MOUNT2 forces legacy mount(2) syscall,",
+            "# bypassing fsconfig 256-byte limit in util-linux >= 2.39)",
+            f"LIBMOUNT_FORCE_MOUNT2=always mount -t overlay overlay "
+            f"-o lowerdir={self._lowerdir_spec},upperdir={upper},workdir={work},userxattr {merged}",
         ]
 
         # Read-only rootfs: bind + remount ro BEFORE other mounts.

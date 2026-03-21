@@ -253,6 +253,156 @@ class TestUserNamespace:
         assert ec2 == 0
         assert output2.strip() == "0"
 
+    def test_layer_cache_enabled(self, userns_sandbox):
+        """Rootless mode should use layer cache (not flat rootfs)."""
+        features = userns_sandbox.features
+        assert features.get("layer_cache") is True
+
+    def test_whiteout_strategy(self, userns_sandbox):
+        """Whiteout strategy should be detected based on kernel version."""
+        from agentdocker_lite.rootfs import _detect_whiteout_strategy
+        strategy = _detect_whiteout_strategy()
+        assert strategy in ("xattr", "userns")
+        assert userns_sandbox.features.get("whiteout") == strategy
+
+    def test_multi_layer_image(self, tmp_path, shared_cache_dir):
+        """Multi-layer image (python:3.11-slim, 4+ layers) works in rootless."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        config = SandboxConfig(
+            image="python:3.11-slim",
+            working_dir="/tmp",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-multi-layer")
+        try:
+            assert sb._layer_dirs is not None
+            assert len(sb._layer_dirs) >= 4
+            output, ec = sb.run("python3 --version")
+            assert ec == 0
+            assert "3.11" in output
+        finally:
+            sb.delete()
+
+    def test_shared_layers_rootless(self, tmp_path, shared_cache_dir):
+        """Two images sharing base layers reuse cached layers in rootless."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        sandboxes = []
+        for i, img in enumerate(["python:3.11-slim", "python:3.12-slim"]):
+            config = SandboxConfig(
+                image=img,
+                working_dir="/tmp",
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+            )
+            sandboxes.append(Sandbox(config, name=f"userns-layer-{i}"))
+        try:
+            layers0 = set(l.name for l in (sandboxes[0]._layer_dirs or []))
+            layers1 = set(l.name for l in (sandboxes[1]._layer_dirs or []))
+            shared = layers0 & layers1
+            assert len(shared) > 0, "python 3.11 and 3.12 should share base layers"
+        finally:
+            for sb in sandboxes:
+                sb.delete()
+
+    def test_read_only_rootfs(self, tmp_path, shared_cache_dir):
+        """Read-only rootfs works in userns mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            read_only=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-ro")
+        try:
+            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            assert ec != 0, "write should fail on read-only rootfs"
+            # /dev/null should still work (mounted on top)
+            _, ec = sb.run("echo x > /dev/null")
+            assert ec == 0
+        finally:
+            sb.delete()
+
+    def test_volume_rw(self, tmp_path, shared_cache_dir):
+        """Read-write volume works in userns mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "input.txt").write_text("from host")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            volumes=[f"{shared}:/mnt/data:rw"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-vol-rw")
+        try:
+            output, ec = sb.run("cat /mnt/data/input.txt")
+            assert ec == 0
+            assert "from host" in output
+            sb.run("echo from_sandbox > /mnt/data/output.txt")
+            assert (shared / "output.txt").read_text().strip() == "from_sandbox"
+        finally:
+            sb.delete()
+
+    def test_volume_ro(self, tmp_path, shared_cache_dir):
+        """Read-only volume works in userns mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "data.txt").write_text("read only")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            volumes=[f"{shared}:/mnt/data:ro"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-vol-ro")
+        try:
+            output, ec = sb.run("cat /mnt/data/data.txt")
+            assert ec == 0
+            assert "read only" in output
+            _, ec = sb.run("echo x > /mnt/data/data.txt 2>&1")
+            assert ec != 0, "write should fail on ro volume"
+        finally:
+            sb.delete()
+
+    def test_hostname(self, tmp_path, shared_cache_dir):
+        """Custom hostname works in userns mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            hostname="userns-box",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-hostname")
+        try:
+            output, ec = sb.run("hostname")
+            assert ec == 0
+            assert "userns-box" in output.strip()
+        finally:
+            sb.delete()
+
 
 # ------------------------------------------------------------------ #
 #  Device passthrough tests (root mode)                                #
