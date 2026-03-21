@@ -759,26 +759,17 @@ class RootfulSandbox(SandboxBase):
     # ------------------------------------------------------------------ #
 
     def _setup_overlay(self):
+        from agentdocker_lite._mount import mount_overlay
+
         for d in (self._upper_dir, self._work_dir, self._rootfs):
             d.mkdir(parents=True, exist_ok=True)
 
-        result = subprocess.run(
-            [
-                "mount",
-                "-t",
-                "overlay",
-                "overlay",
-                "-o",
-                f"lowerdir={self._lowerdir_spec},"
-                f"upperdir={self._upper_dir},"
-                f"workdir={self._work_dir}",
-                str(self._rootfs),
-            ],
-            capture_output=True,
-            text=True,
+        mount_overlay(
+            lowerdir_spec=self._lowerdir_spec,
+            upper_dir=str(self._upper_dir),
+            work_dir=str(self._work_dir),
+            target=str(self._rootfs),
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to mount overlayfs: {result.stderr.strip()}")
 
         # Make overlay mount private to prevent mount propagation.
         # On systemd systems, / is shared by default.  Mounts created
@@ -920,19 +911,19 @@ class RootfulSandbox(SandboxBase):
         upper.mkdir()
         work.mkdir()
 
-        result = subprocess.run(
-            [
-                "mount", "-t", "overlay", "overlay",
-                "-o", f"lowerdir={host_path},upperdir={upper},workdir={work}",
-                str(target),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        from agentdocker_lite._mount import mount_overlay
+
+        try:
+            mount_overlay(
+                lowerdir_spec=str(host_path),
+                upper_dir=str(upper),
+                work_dir=str(work),
+                target=str(target),
+            )
+        except OSError as e:
             logger.warning(
                 "Failed to overlay mount %s -> %s: %s",
-                host_path, container_path, result.stderr.strip(),
+                host_path, container_path, e,
             )
             return
 
@@ -1110,9 +1101,10 @@ class RootfulSandbox(SandboxBase):
     def _start_pasta(self) -> None:
         """Start pasta for NAT'd networking with port mapping.
 
-        Attaches to the sandbox's network namespace.  Requires
-        ``net_isolate=True`` (separate network namespace) and the
-        ``pasta`` binary from the ``passt`` package.
+        Bind-mounts the sandbox's network namespace to ``/run/netns/``
+        and passes ``--netns <name>`` to pasta (mirroring Podman's
+        approach).  This avoids the ``/proc/PID/ns/user`` permission
+        issue when pasta drops privileges.
         """
         port_map = self._config.port_map
         if not port_map:
@@ -1121,7 +1113,7 @@ class RootfulSandbox(SandboxBase):
             logger.warning("port_map requires net_isolate=True; ignoring port_map")
             return
 
-        # Find pasta: vendored binary first, then system PATH
+        # Find pasta binary
         vendored = Path(__file__).parent.parent / "_vendor" / "pasta"
         if vendored.exists() and vendored.is_file():
             pasta_bin = str(vendored)
@@ -1134,19 +1126,65 @@ class RootfulSandbox(SandboxBase):
             )
 
         shell_pid = self._persistent_shell._process.pid
-        cmd: list[str] = [pasta_bin, "--config-net", "-q"]
+
+        # Bind-mount netns to /run/netns/ so pasta can access it
+        # without needing ptrace-level permissions on /proc/PID/ns/*
+        netns_name = f"adl-{self._name}"
+        netns_path = f"/run/netns/{netns_name}"
+        os.makedirs("/run/netns", exist_ok=True)
+        # Clean up stale bind mount from a previous run
+        if os.path.exists(netns_path):
+            subprocess.run(["umount", "-l", netns_path], capture_output=True)
+            try:
+                os.unlink(netns_path)
+            except OSError:
+                pass
+        open(netns_path, "w").close()
+        subprocess.run(
+            ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
+            capture_output=True, check=True,
+        )
+        self._netns_path = netns_path
+
+        cmd: list[str] = [
+            pasta_bin, "--config-net", "-q", "--runas", "0:0",
+            "-f",  # foreground — keep pasta alive as a child process
+        ]
         for mapping in port_map:
-            # "8080:80" → -t 8080:80 (TCP), -u for UDP
             cmd.extend(["-t", mapping])
-        cmd.append(str(shell_pid))
+        cmd.extend(["--netns", netns_name])
 
         self._pasta_process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        logger.debug("pasta started: pid=%d, ports=%s", self._pasta_process.pid, port_map)
+        # Give pasta time to configure the network interface
+        time.sleep(0.2)
+        if self._pasta_process.poll() is not None:
+            raise RuntimeError(
+                f"pasta exited immediately (exit={self._pasta_process.returncode})"
+            )
+
+        # Bring up loopback inside the sandbox (pasta --config-net
+        # sets up the pasta interface but doesn't touch lo)
+        self._persistent_shell.execute(
+            "ip link set lo up 2>/dev/null || "
+            "python3 -c '"
+            "import socket,struct,fcntl;"
+            "s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+            "fcntl.ioctl(s,0x8914,struct.pack(\"16sH\",b\"lo\","
+            "struct.unpack(\"16sH\",fcntl.ioctl(s,0x8913,"
+            "struct.pack(\"16sH\",b\"lo\",0)))[1]|1));"
+            "s.close()' 2>/dev/null || true",
+            timeout=5,
+        )
+
+        logger.debug(
+            "pasta started: pid=%d, netns=%s, ports=%s",
+            self._pasta_process.pid, netns_name, port_map,
+        )
 
     def _stop_pasta(self) -> None:
-        """Stop the pasta networking process."""
+        """Stop pasta and clean up the bind-mounted netns."""
         proc = getattr(self, "_pasta_process", None)
         if proc and proc.poll() is None:
             proc.terminate()
@@ -1156,6 +1194,15 @@ class RootfulSandbox(SandboxBase):
                 proc.kill()
                 proc.wait(timeout=2)
         self._pasta_process = None
+
+        netns_path = getattr(self, "_netns_path", None)
+        if netns_path and os.path.exists(netns_path):
+            subprocess.run(["umount", netns_path], capture_output=True)
+            try:
+                os.unlink(netns_path)
+            except OSError:
+                pass
+            self._netns_path = None
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #

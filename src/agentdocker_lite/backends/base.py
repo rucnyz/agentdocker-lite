@@ -657,15 +657,13 @@ class SandboxBase(abc.ABC):
         # Remount overlayfs (rootful only).
         lowerdir_spec = getattr(self, "_lowerdir_spec", None) or base_rootfs
         if not self._userns and rootfs and lowerdir_spec and work:
-            subprocess.run(
-                [
-                    "mount", "-t", "overlay", "overlay", "-o",
-                    f"lowerdir={lowerdir_spec},"
-                    f"upperdir={upper},"
-                    f"workdir={work}",
-                    str(rootfs),
-                ],
-                capture_output=True,
+            from agentdocker_lite._mount import mount_overlay
+
+            mount_overlay(
+                lowerdir_spec=str(lowerdir_spec),
+                upper_dir=str(upper),
+                work_dir=str(work),
+                target=str(rootfs),
             )
 
         # Re-write seccomp helper for userns mode (upper dir was replaced).

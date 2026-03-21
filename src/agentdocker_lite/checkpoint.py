@@ -405,16 +405,13 @@ class CheckpointManager:
                 base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
                 lowerdir_spec = str(base_rootfs) if base_rootfs else None
             if lowerdir_spec:
-                subprocess.run(
-                    [
-                        "mount", "-t", "overlay", "overlay", "-o",
-                        f"lowerdir={lowerdir_spec},"
-                        f"upperdir={upper},"
-                        f"workdir={work}",
-                        str(rootfs),
-                    ],
-                    capture_output=True,
-                    check=True,
+                from agentdocker_lite._mount import mount_overlay
+
+                mount_overlay(
+                    lowerdir_spec=str(lowerdir_spec),
+                    upper_dir=str(upper),
+                    work_dir=str(work),
+                    target=str(rootfs),
                 )
 
         # 3. Create new pipes for the restored process.
