@@ -78,11 +78,19 @@ class RootfulSandbox(SandboxBase):
 
         # --- paths --------------------------------------------------------
         rootfs_cache_dir = Path(config.rootfs_cache_dir)
-        self._base_rootfs = self._resolve_base_rootfs(
+        self._base_rootfs, self._layer_dirs = self._resolve_base_rootfs(
             image=config.image,
             fs_backend=self._fs_backend,
             rootfs_cache_dir=rootfs_cache_dir,
         )
+        if self._layer_dirs:
+            # Multi-layer overlayfs: top layer last in _layer_dirs,
+            # overlayfs lowerdir wants topmost first
+            self._lowerdir_spec = ":".join(
+                str(d) for d in reversed(self._layer_dirs)
+            )
+        else:
+            self._lowerdir_spec = str(self._base_rootfs)
 
         env_base = Path(config.env_base_dir)
         self._env_dir = env_base / name
@@ -223,11 +231,13 @@ class RootfulSandbox(SandboxBase):
 
         # --- paths --------------------------------------------------------
         rootfs_cache_dir = Path(config.rootfs_cache_dir)
-        self._base_rootfs = self._resolve_base_rootfs(
+        # Userns mode: flat rootfs (layer caching needs mknod → root only)
+        self._base_rootfs = self._resolve_flat_rootfs(
             image=config.image,
-            fs_backend="overlayfs",
             rootfs_cache_dir=rootfs_cache_dir,
         )
+        self._layer_dirs: list[Path] | None = None
+        self._lowerdir_spec = str(self._base_rootfs)
 
         env_base = Path(config.env_base_dir)
         self._env_dir = env_base / name
@@ -377,7 +387,6 @@ class RootfulSandbox(SandboxBase):
         4. Execs into chroot -- after this, stdin commands go to the inner bash
         """
         merged = self._rootfs
-        base = self._base_rootfs
         upper = self._upper_dir
         work = self._work_dir
         shell = self._shell
@@ -393,7 +402,7 @@ class RootfulSandbox(SandboxBase):
             "",
             "# Mount overlayfs",
             f"mount -t overlay overlay "
-            f"-o lowerdir={base},upperdir={upper},workdir={work} {merged}",
+            f"-o lowerdir={self._lowerdir_spec},upperdir={upper},workdir={work} {merged}",
         ]
 
         # Read-only rootfs: bind + remount ro BEFORE other mounts.
@@ -596,25 +605,57 @@ class RootfulSandbox(SandboxBase):
         image: str,
         fs_backend: str,
         rootfs_cache_dir: Path,
-    ) -> Path:
-        import fcntl
+    ) -> tuple[Path, list[Path] | None]:
+        """Resolve the base rootfs for a sandbox.
 
+        For overlayfs (rootful): uses Docker layer-level caching.
+        For btrfs: uses flat rootfs via docker export into a btrfs subvolume.
+        For userns (rootless): uses flat rootfs via docker export
+            (called separately from ``_resolve_flat_rootfs``).
+
+        Returns:
+            A tuple of (base_rootfs_path, layer_dirs).
+            ``layer_dirs`` is an ordered list of layer directories
+            (bottom to top) for multi-layer overlayfs stacking.
+        """
         candidate = Path(image)
         if candidate.exists() and candidate.is_dir():
-            return candidate
+            return candidate, None
 
-        from agentdocker_lite.rootfs import (
-            prepare_btrfs_rootfs_from_docker,
-            prepare_rootfs_from_docker,
+        if fs_backend == "btrfs":
+            return RootfulSandbox._resolve_btrfs_rootfs(
+                image, rootfs_cache_dir,
+            ), None
+
+        # --- overlayfs: layer-level caching ---
+        from agentdocker_lite.rootfs import prepare_rootfs_layers_from_docker
+
+        t0 = time.monotonic()
+        layer_dirs = prepare_rootfs_layers_from_docker(
+            image, rootfs_cache_dir, pull=True,
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(
+            "Layer cache ready (%.1fms): %s (%d layers)",
+            elapsed_ms, image, len(layer_dirs),
+        )
+        return layer_dirs[0], layer_dirs
+
+    @staticmethod
+    def _resolve_btrfs_rootfs(
+        image: str,
+        rootfs_cache_dir: Path,
+    ) -> Path:
+        """Resolve flat rootfs for btrfs backend."""
+        import fcntl
+
+        from agentdocker_lite.rootfs import prepare_btrfs_rootfs_from_docker
 
         safe_name = image.replace("/", "_").replace(":", "_").replace(".", "_")
         cached_rootfs = rootfs_cache_dir / safe_name
 
         if cached_rootfs.exists() and cached_rootfs.is_dir():
-            logger.info("Using cached rootfs for %s: %s", image, cached_rootfs)
-            if fs_backend == "btrfs":
-                RootfulSandbox._verify_btrfs_subvolume(cached_rootfs)
+            RootfulSandbox._verify_btrfs_subvolume(cached_rootfs)
             return cached_rootfs
 
         lock_path = rootfs_cache_dir / f".{safe_name}.lock"
@@ -623,34 +664,57 @@ class RootfulSandbox(SandboxBase):
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
                 if cached_rootfs.exists() and cached_rootfs.is_dir():
-                    logger.info("Rootfs prepared by another worker: %s", cached_rootfs)
-                    if fs_backend == "btrfs":
-                        RootfulSandbox._verify_btrfs_subvolume(cached_rootfs)
+                    RootfulSandbox._verify_btrfs_subvolume(cached_rootfs)
                     return cached_rootfs
 
                 t0 = time.monotonic()
-                logger.info(
-                    "Auto-preparing rootfs from Docker image %s -> %s (fs=%s)",
-                    image,
-                    cached_rootfs,
-                    fs_backend,
-                )
-
-                if fs_backend == "btrfs":
-                    prepare_btrfs_rootfs_from_docker(image, cached_rootfs)
-                else:
-                    prepare_rootfs_from_docker(image, cached_rootfs)
-
+                prepare_btrfs_rootfs_from_docker(image, cached_rootfs)
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.info(
-                    "Auto-prepared rootfs (%.1fms): %s -> %s",
-                    elapsed_ms,
-                    image,
-                    cached_rootfs,
+                    "Auto-prepared btrfs rootfs (%.1fms): %s -> %s",
+                    elapsed_ms, image, cached_rootfs,
                 )
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        return cached_rootfs
 
+    @staticmethod
+    def _resolve_flat_rootfs(
+        image: str,
+        rootfs_cache_dir: Path,
+    ) -> Path:
+        """Resolve flat rootfs via docker export (for userns/rootless)."""
+        import fcntl
+
+        candidate = Path(image)
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+        from agentdocker_lite.rootfs import prepare_rootfs_from_docker
+
+        safe_name = image.replace("/", "_").replace(":", "_").replace(".", "_")
+        cached_rootfs = rootfs_cache_dir / safe_name
+
+        if cached_rootfs.exists() and cached_rootfs.is_dir():
+            return cached_rootfs
+
+        lock_path = rootfs_cache_dir / f".{safe_name}.lock"
+        rootfs_cache_dir.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                if cached_rootfs.exists() and cached_rootfs.is_dir():
+                    return cached_rootfs
+
+                t0 = time.monotonic()
+                prepare_rootfs_from_docker(image, cached_rootfs)
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                logger.info(
+                    "Auto-prepared flat rootfs (%.1fms): %s -> %s",
+                    elapsed_ms, image, cached_rootfs,
+                )
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
         return cached_rootfs
 
     # ------------------------------------------------------------------ #
@@ -705,7 +769,7 @@ class RootfulSandbox(SandboxBase):
                 "overlay",
                 "overlay",
                 "-o",
-                f"lowerdir={self._base_rootfs},"
+                f"lowerdir={self._lowerdir_spec},"
                 f"upperdir={self._upper_dir},"
                 f"workdir={self._work_dir}",
                 str(self._rootfs),

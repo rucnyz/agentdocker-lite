@@ -2,11 +2,312 @@
 
 from __future__ import annotations
 
+import fcntl
+import io
+import json
 import logging
+import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+# ====================================================================== #
+#  Docker layer-level caching                                              #
+# ====================================================================== #
+
+
+def _safe_cache_key(diff_id: str) -> str:
+    """Convert a diff_id like 'sha256:abc...' to a short filesystem-safe key.
+
+    Uses first 16 hex chars of the hash for brevity.  The new mount API
+    (``fsconfig``) has a ~256-byte limit per lowerdir parameter, so full
+    64-char SHA256 hashes cause mount failures with many layers.
+    16 hex chars = 64 bits of collision resistance — sufficient for a
+    local per-user cache.
+    """
+    # "sha256:abcdef..." → "abcdef..."[:16]
+    _, _, hexpart = diff_id.partition(":")
+    return hexpart[:16] if hexpart else diff_id.replace(":", "_")[:16]
+
+
+def _convert_whiteouts_in_layer(layer_dir: Path) -> None:
+    """Convert OCI whiteout files to overlayfs-native whiteouts.
+
+    OCI uses ``.wh.<name>`` sentinel files for deletions.
+    overlayfs uses character device nodes ``(0, 0)`` (rootful) or
+    ``trusted.overlay.whiteout`` xattr.
+
+    This function is called after layer extraction and requires root
+    (mknod c 0 0).  For rootless mode, layer caching is not used.
+    """
+    for dirpath, _dirnames, filenames in os.walk(layer_dir):
+        dp = Path(dirpath)
+        for fname in filenames:
+            if not fname.startswith(".wh."):
+                continue
+            wh_path = dp / fname
+            if fname == ".wh..wh..opq":
+                # Opaque whiteout: mark directory as opaque for overlayfs
+                wh_path.unlink()
+                subprocess.run(
+                    ["setfattr", "-n", "trusted.overlay.opaque",
+                     "-v", "y", str(dp)],
+                    capture_output=True,
+                )
+            else:
+                # File whiteout: replace .wh.<name> with char device (0,0)
+                target_name = fname[4:]  # strip ".wh." prefix
+                target_path = dp / target_name
+                wh_path.unlink()
+                # mknod creates overlayfs-native whiteout
+                os.mknod(str(target_path), 0o600 | 0o020000, os.makedev(0, 0))
+
+
+def _get_image_diff_ids(image_name: str) -> list[str] | None:
+    """Get layer diff_ids from docker inspect."""
+    result = subprocess.run(
+        ["docker", "inspect", "--format",
+         "{{json .RootFS.Layers}}", image_name],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def get_image_config(image_name: str) -> dict | None:
+    """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker image.
+
+    Returns a dict with keys: ``cmd``, ``entrypoint``, ``env``,
+    ``working_dir``, ``exposed_ports``.  Returns ``None`` if the
+    image cannot be inspected.
+
+    Example::
+
+        cfg = get_image_config("my-env:latest")
+        # cfg = {
+        #     "cmd": ["uvicorn", "app:app", "--host", "0.0.0.0"],
+        #     "entrypoint": None,
+        #     "env": {"PATH": "...", "MY_VAR": "value"},
+        #     "working_dir": "/app",
+        #     "exposed_ports": [8000],
+        # }
+    """
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .Config}}", image_name],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        config = json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    # Parse env list ["KEY=VALUE", ...] into dict
+    env_dict: dict[str, str] = {}
+    for entry in config.get("Env") or []:
+        key, _, value = entry.partition("=")
+        env_dict[key] = value
+
+    # Parse ExposedPorts {"8000/tcp": {}, ...} into list of ints
+    ports: list[int] = []
+    for port_proto in config.get("ExposedPorts") or {}:
+        port_str = port_proto.split("/")[0]
+        try:
+            ports.append(int(port_str))
+        except ValueError:
+            pass
+
+    return {
+        "cmd": config.get("Cmd"),
+        "entrypoint": config.get("Entrypoint"),
+        "env": env_dict,
+        "working_dir": config.get("WorkingDir") or None,
+        "exposed_ports": ports,
+    }
+
+
+def prepare_rootfs_layers_from_docker(
+    image_name: str,
+    cache_dir: Path,
+    pull: bool = True,
+) -> list[Path]:
+    """Extract Docker image as individual cached layers for overlayfs stacking.
+
+    Uses ``docker save`` to get image layers, caches each by its content
+    hash (diff_id).  Images sharing base layers skip re-extraction.
+
+    Args:
+        image_name: Docker image (e.g. ``"ubuntu:22.04"``).
+        cache_dir: Root cache directory (e.g. ``~/.cache/agentdocker_lite/rootfs``).
+        pull: Pull the image first.
+
+    Returns:
+        Ordered list of layer directories (bottom to top) for overlayfs
+        ``lowerdir`` stacking.
+
+    Raises:
+        RuntimeError: If layer extraction fails.
+    """
+    if pull:
+        _pull_or_check_local(image_name)
+
+    # Get stable content hashes for cache keys
+    diff_ids = _get_image_diff_ids(image_name)
+    if not diff_ids:
+        raise RuntimeError(
+            f"Cannot get layer diff_ids for {image_name!r}. "
+            f"Ensure Docker is available and the image exists."
+        )
+
+    layers_dir = cache_dir / "layers"
+    layers_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if all layers already cached
+    layer_dirs = [layers_dir / _safe_cache_key(did) for did in diff_ids]
+    if all(d.exists() for d in layer_dirs):
+        logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
+        _write_manifest(cache_dir, image_name, diff_ids)
+        return layer_dirs
+
+    # Need to extract — use docker save
+    logger.info("Extracting layers for %s (%d layers, %d cached)",
+                image_name, len(diff_ids),
+                sum(1 for d in layer_dirs if d.exists()))
+
+    save_proc = subprocess.Popen(
+        ["docker", "save", image_name],
+        stdout=subprocess.PIPE,
+    )
+    with tarfile.open(fileobj=save_proc.stdout, mode="r|") as outer_tar:
+        _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
+    save_proc.wait()
+    if save_proc.returncode != 0:
+        raise RuntimeError(f"docker save failed for {image_name!r}")
+
+    _write_manifest(cache_dir, image_name, diff_ids)
+    logger.info("Layer cache ready for %s: %d layers", image_name, len(layer_dirs))
+    return layer_dirs
+
+
+def _extract_layers_from_save_tar(
+    outer_tar: tarfile.TarFile,
+    diff_ids: list[str],
+    layers_dir: Path,
+) -> None:
+    """Parse docker save tar and extract layer tarballs into cache dirs.
+
+    Handles both legacy Docker format (hash/layer.tar) and modern
+    Docker/OCI hybrid format (blobs/sha256/<hash>).
+    """
+    # Read all members into memory.  Docker save tarballs are typically
+    # small (just metadata + compressed layers), so this is fine.
+    manifest_data = None
+    blobs: dict[str, bytes] = {}
+
+    for member in outer_tar:
+        f = outer_tar.extractfile(member)
+        if f is None:
+            continue
+        data = f.read()
+        f.close()
+
+        if member.name == "manifest.json":
+            manifest_data = json.loads(data)
+        else:
+            blobs[member.name] = data
+
+    if not manifest_data:
+        raise RuntimeError("Cannot parse docker save output: no manifest.json found")
+
+    # manifest.json = [{"Layers": ["blobs/sha256/<hash>", ...], ...}]
+    layer_paths = manifest_data[0].get("Layers", [])
+    if len(layer_paths) != len(diff_ids):
+        raise ValueError(
+            f"Layer count mismatch: manifest has {len(layer_paths)}, "
+            f"diff_ids has {len(diff_ids)}"
+        )
+
+    for layer_path, diff_id in zip(layer_paths, diff_ids):
+        cache_key = _safe_cache_key(diff_id)
+        layer_dir = layers_dir / cache_key
+        if layer_dir.exists():
+            continue  # Already cached
+
+        raw = blobs.get(layer_path)
+        if raw is None:
+            raise RuntimeError(f"Layer blob not found in archive: {layer_path}")
+
+        _extract_single_layer_locked(raw, layer_dir, layers_dir)
+
+
+def _extract_single_layer_locked(
+    raw: bytes,
+    layer_dir: Path,
+    layers_dir: Path,
+) -> None:
+    """Extract a single layer tarball with file locking for concurrent safety."""
+    import shutil
+
+    lock_path = layers_dir / f".{layer_dir.name}.lock"
+    tmp_dir = layer_dir.with_suffix(".extracting")
+    with open(lock_path, "w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            if layer_dir.exists():
+                return  # Another process extracted while we waited
+
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+            tmp_dir.mkdir(parents=True)
+
+            # Extract tar (use "tar" filter not "data" — rootfs layers
+            # contain absolute symlinks which "data" rejects)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as lt:
+                lt.extractall(tmp_dir, filter="tar")
+
+            # Convert OCI whiteouts to overlayfs whiteouts
+            _convert_whiteouts_in_layer(tmp_dir)
+
+            # Atomic rename
+            tmp_dir.rename(layer_dir)
+            logger.debug("Extracted layer: %s", layer_dir.name)
+        except Exception:
+            # Clean up partial extraction
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    # Clean up lock file (best effort)
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
+def _write_manifest(
+    cache_dir: Path,
+    image_name: str,
+    diff_ids: list[str],
+) -> None:
+    """Write manifest mapping image name to its layer diff_ids."""
+    manifests_dir = cache_dir / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
+    manifest_path = manifests_dir / f"{safe_name}.json"
+    manifest_path.write_text(json.dumps({
+        "image": image_name,
+        "diff_ids": diff_ids,
+        "layers": [_safe_cache_key(did) for did in diff_ids],
+    }, indent=2))
 
 
 def _pull_or_check_local(image_name: str) -> None:
