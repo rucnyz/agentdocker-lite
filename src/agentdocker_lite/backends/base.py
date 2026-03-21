@@ -209,6 +209,23 @@ class SandboxBase(abc.ABC):
         logger.debug("cmd (%.1fms exit=%d): %.200s", elapsed_ms, exit_code, cmd_str)
         return output, exit_code
 
+    async def arun(
+        self, command: str | list[str], timeout: Optional[int] = None
+    ) -> tuple[str, int]:
+        """Async version of :meth:`run`."""
+        import asyncio
+        return await asyncio.to_thread(self.run, command, timeout)
+
+    async def areset(self) -> None:
+        """Async version of :meth:`reset`."""
+        import asyncio
+        await asyncio.to_thread(self.reset)
+
+    async def adelete(self) -> None:
+        """Async version of :meth:`delete`."""
+        import asyncio
+        await asyncio.to_thread(self.delete)
+
     def write_stdin(self, data: str | bytes) -> None:
         """Write raw data to the sandbox shell's stdin (PTY mode only).
 
