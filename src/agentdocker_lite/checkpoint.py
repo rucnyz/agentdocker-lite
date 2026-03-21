@@ -400,12 +400,15 @@ class CheckpointManager:
                 shutil.rmtree(work)
                 work.mkdir(parents=True)
             # Remount overlayfs.
-            base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
-            if base_rootfs:
+            lowerdir_spec = getattr(self._sandbox, "_lowerdir_spec", None)
+            if not lowerdir_spec:
+                base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
+                lowerdir_spec = str(base_rootfs) if base_rootfs else None
+            if lowerdir_spec:
                 subprocess.run(
                     [
                         "mount", "-t", "overlay", "overlay", "-o",
-                        f"lowerdir={base_rootfs},"
+                        f"lowerdir={lowerdir_spec},"
                         f"upperdir={upper},"
                         f"workdir={work}",
                         str(rootfs),

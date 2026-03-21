@@ -140,5 +140,55 @@ def main():
     print("Done.")
 
 
+def demo_layer_cache():
+    """Demonstrate Docker layer-level caching.
+
+    Images sharing base layers (e.g. python:3.11-slim and python:3.12-slim
+    both use Debian bookworm) only extract the unique layers on the second
+    pull — shared layers are cached and reused via overlayfs multi-layer
+    stacking.
+    """
+    import time
+    from pathlib import Path
+
+    images = ["python:3.11-slim", "python:3.12-slim"]
+    sandboxes = []
+
+    for img in images:
+        t0 = time.monotonic()
+        sb = Sandbox(SandboxConfig(image=img), name=f"layer-demo-{img.replace(':', '-')}")
+        elapsed = (time.monotonic() - t0) * 1000
+        sandboxes.append(sb)
+
+        layers = getattr(sb, "_layer_dirs", None)
+        n_layers = len(layers) if layers else 0
+        out, _ = sb.run("python3 --version")
+        print(f"  {img}: {elapsed:.0f}ms, {n_layers} layers, {out.strip()}")
+
+    # Show layer deduplication
+    all_layers = []
+    for sb in sandboxes:
+        layers = getattr(sb, "_layer_dirs", None) or []
+        all_layers.append({l.name for l in layers})
+
+    if len(all_layers) == 2:
+        shared = all_layers[0] & all_layers[1]
+        total = all_layers[0] | all_layers[1]
+        print(f"  Shared layers: {len(shared)}/{len(total)} "
+              f"({len(shared)/len(total)*100:.0f}% deduplication)")
+
+    # Show cache disk usage
+    cache_dir = Path(sandboxes[0]._config.rootfs_cache_dir) / "layers"
+    if cache_dir.exists():
+        total_bytes = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
+        print(f"  Layer cache: {total_bytes / 1024 / 1024:.0f}MB on disk")
+
+    for sb in sandboxes:
+        sb.delete()
+
+
 if __name__ == "__main__":
     main()
+    print()
+    print("=== Layer Cache Demo ===")
+    demo_layer_cache()

@@ -655,11 +655,12 @@ class SandboxBase(abc.ABC):
             work.mkdir(parents=True)
 
         # Remount overlayfs (rootful only).
-        if not self._userns and rootfs and base_rootfs and work:
+        lowerdir_spec = getattr(self, "_lowerdir_spec", None) or base_rootfs
+        if not self._userns and rootfs and lowerdir_spec and work:
             subprocess.run(
                 [
                     "mount", "-t", "overlay", "overlay", "-o",
-                    f"lowerdir={base_rootfs},"
+                    f"lowerdir={lowerdir_spec},"
                     f"upperdir={upper},"
                     f"workdir={work}",
                     str(rootfs),
