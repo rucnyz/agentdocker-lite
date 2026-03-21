@@ -148,78 +148,85 @@ def _convert_whiteouts_in_userns(layer_dir: Path) -> None:
 
 
 
+def _container_cli() -> str | None:
+    """Return 'docker' or 'podman' if available, else None."""
+    import shutil
+    for cli in ("docker", "podman"):
+        if shutil.which(cli):
+            return cli
+    return None
+
+
 def _get_image_diff_ids(image_name: str) -> list[str] | None:
-    """Get layer diff_ids from docker inspect."""
-    result = subprocess.run(
-        ["docker", "inspect", "--format",
-         "{{json .RootFS.Layers}}", image_name],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout.strip())
-    except (json.JSONDecodeError, TypeError):
-        return None
+    """Get layer diff_ids. Tries docker/podman inspect, then registry API."""
+    cli = _container_cli()
+    if cli:
+        result = subprocess.run(
+            [cli, "inspect", "--format",
+             "{{json .RootFS.Layers}}", image_name],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            try:
+                return json.loads(result.stdout.strip())
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # Fallback: registry API (no Docker/Podman needed)
+    from agentdocker_lite._registry import get_diff_ids_from_registry
+    return get_diff_ids_from_registry(image_name)
 
 
 def get_image_config(image_name: str) -> dict | None:
-    """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker image.
+    """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker/OCI image.
+
+    Tries docker/podman inspect first, falls back to registry API.
 
     Returns a dict with keys: ``cmd``, ``entrypoint``, ``env``,
     ``working_dir``, ``exposed_ports``.  Returns ``None`` if the
     image cannot be inspected.
-
-    Example::
-
-        cfg = get_image_config("my-env:latest")
-        # cfg = {
-        #     "cmd": ["uvicorn", "app:app", "--host", "0.0.0.0"],
-        #     "entrypoint": None,
-        #     "env": {"PATH": "...", "MY_VAR": "value"},
-        #     "working_dir": "/app",
-        #     "exposed_ports": [8000],
-        # }
     """
-    # Ensure image is available locally, pulling if needed
-    try:
-        _pull_or_check_local(image_name)
-    except RuntimeError:
-        return None
-
-    result = subprocess.run(
-        ["docker", "inspect", "--format", "{{json .Config}}", image_name],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        config = json.loads(result.stdout.strip())
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-    # Parse env list ["KEY=VALUE", ...] into dict
-    env_dict: dict[str, str] = {}
-    for entry in config.get("Env") or []:
-        key, _, value = entry.partition("=")
-        env_dict[key] = value
-
-    # Parse ExposedPorts {"8000/tcp": {}, ...} into list of ints
-    ports: list[int] = []
-    for port_proto in config.get("ExposedPorts") or {}:
-        port_str = port_proto.split("/")[0]
+    cli = _container_cli()
+    if cli:
         try:
-            ports.append(int(port_str))
-        except ValueError:
+            _pull_or_check_local(image_name, cli=cli)
+        except RuntimeError:
             pass
+        else:
+            result = subprocess.run(
+                [cli, "inspect", "--format", "{{json .Config}}", image_name],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                try:
+                    config = json.loads(result.stdout.strip())
+                except (json.JSONDecodeError, TypeError):
+                    config = None
+                if config:
+                    env_dict: dict[str, str] = {}
+                    for entry in config.get("Env") or []:
+                        key, _, value = entry.partition("=")
+                        env_dict[key] = value
 
-    return {
-        "cmd": config.get("Cmd"),
-        "entrypoint": config.get("Entrypoint"),
-        "env": env_dict,
-        "working_dir": config.get("WorkingDir") or None,
-        "exposed_ports": ports,
-    }
+                    ports: list[int] = []
+                    for port_proto in config.get("ExposedPorts") or {}:
+                        port_str = port_proto.split("/")[0]
+                        try:
+                            ports.append(int(port_str))
+                        except ValueError:
+                            pass
+
+                    return {
+                        "cmd": config.get("Cmd"),
+                        "entrypoint": config.get("Entrypoint"),
+                        "env": env_dict,
+                        "working_dir": config.get("WorkingDir") or None,
+                        "exposed_ports": ports,
+                    }
+
+    # Fallback: registry API
+    from agentdocker_lite._registry import get_config_from_registry
+    return get_config_from_registry(image_name)
 
 
 def prepare_rootfs_layers_from_docker(
@@ -257,14 +264,15 @@ def prepare_rootfs_layers_from_docker(
             return layer_dirs
 
     # Need image metadata — pull if requested, then get diff_ids
-    if pull:
-        _pull_or_check_local(image_name)
+    cli = _container_cli()
+    if pull and cli:
+        _pull_or_check_local(image_name, cli=cli)
 
     diff_ids = _get_image_diff_ids(image_name)
     if not diff_ids:
         raise RuntimeError(
             f"Cannot get layer diff_ids for {image_name!r}. "
-            f"Ensure Docker is available and the image exists."
+            f"Ensure Docker/Podman is available or the image exists on a registry."
         )
 
     # Check again with fresh diff_ids (image may have been updated)
@@ -274,24 +282,51 @@ def prepare_rootfs_layers_from_docker(
         _write_manifest(cache_dir, image_name, diff_ids)
         return layer_dirs
 
-    # Need to extract — use docker save
+    # Need to extract missing layers
+    needed = {did for did, d in zip(diff_ids, layer_dirs) if not d.exists()}
     logger.info("Extracting layers for %s (%d layers, %d cached)",
-                image_name, len(diff_ids),
-                sum(1 for d in layer_dirs if d.exists()))
+                image_name, len(diff_ids), len(diff_ids) - len(needed))
 
-    save_proc = subprocess.Popen(
-        ["docker", "save", image_name],
-        stdout=subprocess.PIPE,
-    )
-    with tarfile.open(fileobj=save_proc.stdout, mode="r|") as outer_tar:
-        _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
-    save_proc.wait()
-    if save_proc.returncode != 0:
-        raise RuntimeError(f"docker save failed for {image_name!r}")
+    if cli:
+        # Use docker/podman save
+        save_proc = subprocess.Popen(
+            [cli, "save", image_name],
+            stdout=subprocess.PIPE,
+        )
+        with tarfile.open(fileobj=save_proc.stdout, mode="r|") as outer_tar:
+            _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
+        save_proc.wait()
+        if save_proc.returncode != 0:
+            raise RuntimeError(f"{cli} save failed for {image_name!r}")
+    else:
+        # No container CLI — download directly from registry
+        _extract_layers_from_registry(image_name, needed, layers_dir)
 
     _write_manifest(cache_dir, image_name, diff_ids)
     logger.info("Layer cache ready for %s: %d layers", image_name, len(layer_dirs))
     return layer_dirs
+
+
+def _extract_layers_from_registry(
+    image_name: str,
+    needed_diff_ids: set[str],
+    layers_dir: Path,
+) -> None:
+    """Download and extract layers directly from registry (no Docker/Podman)."""
+    import gzip
+    from agentdocker_lite._registry import pull_image_layers
+
+    blobs = pull_image_layers(image_name, needed_diff_ids)
+    for diff_id, compressed_blob in blobs.items():
+        layer_dir = layers_dir / _safe_cache_key(diff_id)
+        if layer_dir.exists():
+            continue
+        # Registry layers are gzip-compressed tarballs
+        try:
+            raw = gzip.decompress(compressed_blob)
+        except gzip.BadGzipFile:
+            raw = compressed_blob  # already uncompressed
+        _extract_single_layer_locked(raw, layer_dir, layers_dir)
 
 
 def _extract_layers_from_save_tar(
@@ -423,26 +458,29 @@ def _write_manifest(
     }, indent=2))
 
 
-def _pull_or_check_local(image_name: str) -> None:
+def _pull_or_check_local(image_name: str, cli: str | None = None) -> None:
     """Ensure image is available locally, pulling only if needed."""
-    # Check local first (like `docker run` behavior)
+    if cli is None:
+        cli = _container_cli()
+    if not cli:
+        raise RuntimeError("No container CLI (docker/podman) available")
+
     check = subprocess.run(
-        ["docker", "image", "inspect", image_name],
+        [cli, "image", "inspect", image_name],
         capture_output=True,
     )
     if check.returncode == 0:
         logger.debug("Image exists locally: %s", image_name)
         return
 
-    # Not local — pull
     logger.info("Pulling image: %s", image_name)
     result = subprocess.run(
-        ["docker", "pull", image_name],
+        [cli, "pull", image_name],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"docker pull failed: {result.stderr.strip()}")
+        raise RuntimeError(f"{cli} pull failed: {result.stderr.strip()}")
 
 
 def prepare_rootfs_from_docker(
@@ -510,70 +548,6 @@ def prepare_rootfs_from_docker(
     logger.info("Rootfs ready: %s", output_dir)
     return output_dir
 
-
-def prepare_rootfs_without_docker(
-    image_ref: str,
-    output_dir: str | Path,
-) -> Path:
-    """Export an OCI image as a rootfs without requiring a Docker daemon.
-
-    Uses ``skopeo`` + ``umoci`` which can run without root and without
-    a running Docker daemon.
-
-    Args:
-        image_ref: OCI image reference (e.g. ``"docker://ubuntu:22.04"``).
-        output_dir: Target directory for the extracted rootfs.
-
-    Returns:
-        Path to the rootfs bundle directory.
-
-    Raises:
-        RuntimeError: If skopeo/umoci commands fail.
-        FileNotFoundError: If skopeo or umoci is not installed.
-    """
-    import shutil
-    import tempfile
-
-    for tool in ("skopeo", "umoci"):
-        if shutil.which(tool) is None:
-            raise FileNotFoundError(
-                f"{tool} not found. Install it: apt-get install {tool}"
-            )
-
-    output_dir = Path(output_dir)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        oci_dir = Path(tmp) / "oci_image"
-
-        if not image_ref.startswith("docker://"):
-            image_ref = f"docker://{image_ref}"
-
-        logger.info("Copying %s via skopeo", image_ref)
-        result = subprocess.run(
-            ["skopeo", "copy", image_ref, f"oci:{oci_dir}:latest"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"skopeo copy failed: {result.stderr.strip()}")
-
-        logger.info("Unpacking OCI image via umoci -> %s", output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["umoci", "unpack", "--image", f"{oci_dir}:latest", str(output_dir)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"umoci unpack failed: {result.stderr.strip()}")
-
-    rootfs_path = output_dir / "rootfs"
-    if rootfs_path.is_dir():
-        logger.info("Rootfs ready: %s", rootfs_path)
-        return rootfs_path
-
-    logger.info("Rootfs ready: %s", output_dir)
-    return output_dir
 
 
 def prepare_btrfs_rootfs_from_docker(

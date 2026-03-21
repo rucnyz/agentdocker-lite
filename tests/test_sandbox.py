@@ -1243,3 +1243,56 @@ class TestDeleteCleansBackground:
         rootfs = tmp_path / "envs" / "bg-cleanup" / "rootfs"
         assert not rootfs.exists() or not os.path.ismount(str(rootfs))
 
+
+# ------------------------------------------------------------------ #
+#  Registry client                                                      #
+# ------------------------------------------------------------------ #
+
+
+class TestRegistry:
+    def test_parse_image_ref(self):
+        """parse_image_ref correctly splits registry/repo/tag."""
+        from agentdocker_lite._registry import parse_image_ref
+
+        assert parse_image_ref("ubuntu:22.04") == (
+            "registry-1.docker.io", "library/ubuntu", "22.04")
+        assert parse_image_ref("python:3.11-slim") == (
+            "registry-1.docker.io", "library/python", "3.11-slim")
+        assert parse_image_ref("nginx") == (
+            "registry-1.docker.io", "library/nginx", "latest")
+        assert parse_image_ref("ghcr.io/org/repo:v1") == (
+            "ghcr.io", "org/repo", "v1")
+
+    def test_get_diff_ids_from_registry(self):
+        """Can get layer diff_ids directly from Docker Hub."""
+        from agentdocker_lite._registry import get_diff_ids_from_registry
+
+        ids = get_diff_ids_from_registry("ubuntu:22.04")
+        assert ids is not None
+        assert len(ids) >= 1
+        assert all(d.startswith("sha256:") for d in ids)
+
+    def test_get_config_from_registry(self):
+        """Can get image config directly from Docker Hub."""
+        from agentdocker_lite._registry import get_config_from_registry
+
+        cfg = get_config_from_registry("python:3.11-slim")
+        assert cfg is not None
+        assert cfg["cmd"] == ["python3"]
+
+    def test_registry_fallback_layers(self, tmp_path):
+        """Layer extraction works via registry when Docker/Podman unavailable."""
+        import agentdocker_lite.rootfs as rf
+
+        orig = rf._container_cli
+        rf._container_cli = lambda: None  # Force registry path
+        try:
+            layers = rf.prepare_rootfs_layers_from_docker(
+                "ubuntu:22.04", tmp_path / "cache",
+            )
+            assert len(layers) >= 1
+            # Layer should have rootfs content
+            assert (layers[0] / "bin").exists() or (layers[0] / "usr").exists()
+        finally:
+            rf._container_cli = orig
+
