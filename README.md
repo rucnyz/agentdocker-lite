@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/rucnyz/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/rucnyz/agentdocker-lite/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
-[![Python](https://img.shields.io/pypi/pyversions/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/agentdocker-lite/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
