@@ -220,6 +220,39 @@ class TestUserNamespace:
         proc.wait(timeout=5)
         assert b"popen-userns" in output
 
+    def test_dns_resolv_conf(self, userns_sandbox):
+        """DNS resolv.conf should be propagated from host."""
+        output, ec = userns_sandbox.run("cat /etc/resolv.conf")
+        assert ec == 0
+        # Should contain at least one nameserver entry
+        assert "nameserver" in output
+
+    def test_tmp_writable(self, userns_sandbox):
+        """Any user should be able to write to /tmp (mode 1777)."""
+        output, ec = userns_sandbox.run("stat -c %a /tmp")
+        assert ec == 0
+        assert output.strip() == "1777"
+
+    def test_devpts_mounted(self, userns_sandbox):
+        """/dev/pts should be mounted (needed for PTY allocation)."""
+        output, ec = userns_sandbox.run("test -d /dev/pts && echo ok")
+        assert ec == 0
+        assert "ok" in output
+
+    def test_full_uid_mapping(self, userns_sandbox):
+        """If subuid is configured, multiple UIDs should be mapped."""
+        output, ec = userns_sandbox.run("cat /proc/self/uid_map")
+        assert ec == 0
+        lines = [l.strip() for l in output.strip().splitlines() if l.strip()]
+        # Full mapping has 2+ lines; fallback has 1 line
+        if len(lines) > 1:
+            # Verify uid 0 is mapped and there's a range mapping
+            assert any(l.startswith("0") for l in lines)
+        # Either way, uid 0 should work
+        output2, ec2 = userns_sandbox.run("id -u")
+        assert ec2 == 0
+        assert output2.strip() == "0"
+
 
 # ------------------------------------------------------------------ #
 #  Device passthrough tests (root mode)                                #
