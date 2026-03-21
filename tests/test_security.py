@@ -33,7 +33,7 @@ def _requires_docker():
 
 
 @pytest.fixture
-def root_sandbox(tmp_path):
+def root_sandbox(tmp_path, shared_cache_dir):
     """Standard root sandbox with seccomp enabled (default)."""
     _requires_root()
     _requires_docker()
@@ -41,7 +41,7 @@ def root_sandbox(tmp_path):
         image=TEST_IMAGE,
         working_dir="/workspace",
         env_base_dir=str(tmp_path / "envs"),
-        rootfs_cache_dir=str(tmp_path / "cache"),
+        rootfs_cache_dir=shared_cache_dir,
         seccomp=True,
     )
     sb = Sandbox(config, name="sec-test")
@@ -50,7 +50,7 @@ def root_sandbox(tmp_path):
 
 
 @pytest.fixture
-def userns_sandbox(tmp_path):
+def userns_sandbox(tmp_path, shared_cache_dir):
     """User namespace sandbox — skipped if running as root."""
     if os.geteuid() == 0:
         pytest.skip("userns test must run as non-root")
@@ -59,7 +59,7 @@ def userns_sandbox(tmp_path):
         image=TEST_IMAGE,
         working_dir="/workspace",
         env_base_dir=str(tmp_path / "envs"),
-        rootfs_cache_dir=str(tmp_path / "cache"),
+        rootfs_cache_dir=shared_cache_dir,
     )
     sb = Sandbox(config, name="userns-test")
     yield sb
@@ -136,7 +136,7 @@ class TestCleanup:
         _requires_root()
         SandboxBase.cleanup_stale(str(tmp_path / "envs"))
 
-    def test_cleanup_stale_removes_leftover(self, tmp_path):
+    def test_cleanup_stale_removes_leftover(self, tmp_path, shared_cache_dir):
         """cleanup_stale() removes leftover sandbox directories."""
         _requires_root()
         _requires_docker()
@@ -144,7 +144,7 @@ class TestCleanup:
             image=TEST_IMAGE,
             working_dir="/",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="stale-test")
         env_dir = tmp_path / "envs" / "stale-test"
@@ -268,7 +268,7 @@ class TestDevices:
         assert ec == 0
         assert "ok" in output
 
-    def test_device_passthrough(self, tmp_path):
+    def test_device_passthrough(self, tmp_path, shared_cache_dir):
         """Passed-through device should be accessible."""
         _requires_root()
         _requires_docker()
@@ -276,7 +276,7 @@ class TestDevices:
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/null"],  # /dev/null exists on all Linux
         )
         sb = Sandbox(config, name="dev-test")
@@ -309,14 +309,14 @@ class TestHardening:
         # Should fail with permission error or read-only error
         assert ec != 0
 
-    def test_oom_score_adj(self, tmp_path):
+    def test_oom_score_adj(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
             oom_score_adj=500,
         )
         sb = Sandbox(config, name="oom-test")
@@ -327,14 +327,14 @@ class TestHardening:
         finally:
             sb.delete()
 
-    def test_cpuset(self, tmp_path):
+    def test_cpuset(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
             cpuset_cpus="0",
         )
         sb = Sandbox(config, name="cpuset-test")

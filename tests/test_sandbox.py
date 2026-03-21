@@ -32,14 +32,14 @@ def _requires_docker():
 
 
 @pytest.fixture
-def sandbox(tmp_path):
+def sandbox(tmp_path, shared_cache_dir):
     _requires_root()
     _requires_docker()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
         env_base_dir=str(tmp_path / "envs"),
-        rootfs_cache_dir=str(tmp_path / "cache"),
+        rootfs_cache_dir=shared_cache_dir,
     )
     sb = Sandbox(config, name="test")
     yield sb
@@ -52,13 +52,13 @@ def sandbox(tmp_path):
 
 
 class TestLifecycle:
-    def test_create_and_delete(self, tmp_path):
+    def test_create_and_delete(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="lifecycle")
         assert sb.rootfs.exists()
@@ -97,14 +97,14 @@ class TestRun:
         assert ec == 0
         assert "/workspace" in output
 
-    def test_environment(self, tmp_path):
+    def test_environment(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         config = SandboxConfig(
             image=TEST_IMAGE,
             environment={"MY_VAR": "test_value_123"},
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="env-test")
         output, ec = sb.run("echo $MY_VAR")
@@ -226,7 +226,7 @@ class TestReset:
 
 
 class TestConcurrency:
-    def test_parallel_sandboxes(self, tmp_path):
+    def test_parallel_sandboxes(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         n = 2  # CI runners have limited resources
@@ -236,7 +236,7 @@ class TestConcurrency:
                 image=TEST_IMAGE,
                 working_dir="/workspace",
                 env_base_dir=str(tmp_path / "envs"),
-                rootfs_cache_dir=str(tmp_path / "cache"),
+                rootfs_cache_dir=shared_cache_dir,
             )
             sb = Sandbox(config, name=f"parallel-{i}")
             output, ec = sb.run(f"echo worker-{i}")
@@ -287,7 +287,7 @@ class TestPerformance:
 
 
 @pytest.fixture
-def tty_sandbox(tmp_path):
+def tty_sandbox(tmp_path, shared_cache_dir):
     _requires_root()
     _requires_docker()
     config = SandboxConfig(
@@ -295,7 +295,7 @@ def tty_sandbox(tmp_path):
         working_dir="/workspace",
         tty=True,
         env_base_dir=str(tmp_path / "envs"),
-        rootfs_cache_dir=str(tmp_path / "cache"),
+        rootfs_cache_dir=shared_cache_dir,
     )
     sb = Sandbox(config, name="tty-test")
     yield sb
@@ -395,7 +395,7 @@ class TestBackground:
 
 
 class TestNetIsolate:
-    def test_loopback_only(self, tmp_path):
+    def test_loopback_only(self, tmp_path, shared_cache_dir):
         """With net_isolate, only loopback should exist."""
         _requires_root()
         _requires_docker()
@@ -404,7 +404,7 @@ class TestNetIsolate:
             working_dir="/workspace",
             net_isolate=True,
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="net-test")
         output, ec = sb.run("ip link show 2>/dev/null || cat /proc/net/dev")
@@ -506,7 +506,7 @@ class TestSaveAsImage:
 
 
 class TestVolumes:
-    def test_ro_volume(self, tmp_path):
+    def test_ro_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         host_dir = tmp_path / "host_data"
@@ -517,7 +517,7 @@ class TestVolumes:
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
             volumes=[f"{host_dir}:/mnt/data:ro"],
         )
         sb = Sandbox(config, name="vol-ro")
@@ -532,7 +532,7 @@ class TestVolumes:
         finally:
             sb.delete()
 
-    def test_rw_volume(self, tmp_path):
+    def test_rw_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         host_dir = tmp_path / "host_rw"
@@ -542,7 +542,7 @@ class TestVolumes:
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
             volumes=[f"{host_dir}:/mnt/data:rw"],
         )
         sb = Sandbox(config, name="vol-rw")
@@ -565,14 +565,14 @@ class TestObservability:
         assert "mask_paths" in sandbox.features
         assert "cap_drop" in sandbox.features
 
-    def test_pressure(self, tmp_path):
+    def test_pressure(self, tmp_path, shared_cache_dir):
         _requires_root()
         _requires_docker()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
             cpu_max="50000 100000",
         )
         sb = Sandbox(config, name="psi-test")
@@ -609,7 +609,7 @@ class TestFsIsolation:
         base_marker = sandbox._base_rootfs / "etc" / "MARKER_FILE_TEST"
         assert not base_marker.exists()
 
-    def test_two_sandboxes_isolated(self, tmp_path):
+    def test_two_sandboxes_isolated(self, tmp_path, shared_cache_dir):
         """Two sandboxes sharing the same image have independent filesystems."""
         _requires_root()
         _requires_docker()
@@ -617,7 +617,7 @@ class TestFsIsolation:
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb1 = Sandbox(config, name="iso-1")
         sb2 = Sandbox(config, name="iso-2")
@@ -696,7 +696,7 @@ def _cgroup_v2_available():
 
 
 class TestResourceLimits:
-    def test_memory_limit_enforced(self, tmp_path):
+    def test_memory_limit_enforced(self, tmp_path, shared_cache_dir):
         """A process exceeding memory_max should be killed or fail to allocate."""
         _requires_root()
         _requires_docker()
@@ -708,7 +708,7 @@ class TestResourceLimits:
             working_dir="/workspace",
             memory_max="16777216",  # 16 MB
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="mem-limit")
         # Try to allocate 100 MB -- should fail or be killed
@@ -719,7 +719,7 @@ class TestResourceLimits:
         assert ec != 0
         sb.delete()
 
-    def test_pids_limit_enforced(self, tmp_path):
+    def test_pids_limit_enforced(self, tmp_path, shared_cache_dir):
         """pids_max should be correctly written to the cgroup."""
         _requires_root()
         _requires_docker()
@@ -731,7 +731,7 @@ class TestResourceLimits:
             working_dir="/workspace",
             pids_max="42",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="pid-limit")
         # Verify cgroup pids.max is set correctly from the host side
@@ -745,7 +745,7 @@ class TestResourceLimits:
         assert "pids-ok" in output
         sb.delete()
 
-    def test_cpu_max_accepted(self, tmp_path):
+    def test_cpu_max_accepted(self, tmp_path, shared_cache_dir):
         """cpu_max config should not cause errors during sandbox creation."""
         _requires_root()
         _requires_docker()
@@ -757,7 +757,7 @@ class TestResourceLimits:
             working_dir="/workspace",
             cpu_max="50000 100000",  # 50% of one CPU
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="cpu-limit")
         output, ec = sb.run("echo cpu-ok")
@@ -806,7 +806,7 @@ class TestEdgeCases:
         assert ec == 0
         assert "hello world" in output
 
-    def test_run_after_delete(self, tmp_path):
+    def test_run_after_delete(self, tmp_path, shared_cache_dir):
         """Running a command after delete should fail gracefully."""
         _requires_root()
         _requires_docker()
@@ -814,7 +814,7 @@ class TestEdgeCases:
             image=TEST_IMAGE,
             working_dir="/workspace",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="dead-sandbox")
         sb.delete()
@@ -920,7 +920,7 @@ def _requires_tun():
 
 
 class TestPortMap:
-    def test_port_mapping(self, tmp_path):
+    def test_port_mapping(self, tmp_path, shared_cache_dir):
         """port_map forwards host port to sandbox server."""
         _requires_root()
         _requires_docker()
@@ -934,6 +934,7 @@ class TestPortMap:
             port_map=["19876:8000"],
             seccomp=False,
             env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="port-test")
         try:
@@ -955,7 +956,7 @@ class TestPortMap:
         finally:
             sb.delete()
 
-    def test_internal_loopback(self, tmp_path):
+    def test_internal_loopback(self, tmp_path, shared_cache_dir):
         """Loopback is automatically brought up inside net-isolated sandbox."""
         _requires_root()
         _requires_tun()
@@ -968,6 +969,7 @@ class TestPortMap:
             port_map=["19877:8000"],
             seccomp=False,
             env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="lo-test")
         try:
@@ -992,12 +994,12 @@ class TestPortMap:
 
 
 class TestLayerCache:
-    def test_shared_layers(self, tmp_path):
+    def test_shared_layers(self, tmp_path, shared_cache_dir):
         """Two images sharing base layers reuse cached layers."""
         _requires_root()
         _requires_docker()
 
-        cache_dir = tmp_path / "cache"
+        cache_dir = Path(shared_cache_dir)
         configs = []
         sandboxes = []
         for i, img in enumerate(["python:3.11-slim", "python:3.12-slim"]):
@@ -1026,7 +1028,7 @@ class TestLayerCache:
             for sb in sandboxes:
                 sb.delete()
 
-    def test_multi_layer_image(self, tmp_path):
+    def test_multi_layer_image(self, tmp_path, shared_cache_dir):
         """An image with many layers mounts and works correctly."""
         _requires_root()
         _requires_docker()
@@ -1035,7 +1037,7 @@ class TestLayerCache:
             image="python:3.11-slim",  # 4 layers
             working_dir="/tmp",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="multi-layer")
         try:
@@ -1061,7 +1063,7 @@ class TestLayerCache:
 
 
 class TestClone3Fallback:
-    def test_threading_works_with_seccomp(self, tmp_path):
+    def test_threading_works_with_seccomp(self, tmp_path, shared_cache_dir):
         """clone3 returns ENOSYS so glibc falls back to clone(2), allowing threads."""
         _requires_root()
         _requires_docker()
@@ -1070,6 +1072,7 @@ class TestClone3Fallback:
             working_dir="/tmp",
             seccomp=True,  # seccomp ON — clone3 should get ENOSYS
             env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="clone3-test")
         try:
@@ -1094,7 +1097,7 @@ class TestClone3Fallback:
 
 
 class TestHostname:
-    def test_custom_hostname(self, tmp_path):
+    def test_custom_hostname(self, tmp_path, shared_cache_dir):
         """hostname= sets the UTS hostname inside the sandbox."""
         _requires_root()
         _requires_docker()
@@ -1114,7 +1117,7 @@ class TestHostname:
             hostname="my-sandbox",
             net_isolate=True,
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="hostname-test")
         try:
@@ -1131,7 +1134,7 @@ class TestHostname:
 
 
 class TestReadOnly:
-    def test_read_only_rootfs(self, tmp_path):
+    def test_read_only_rootfs(self, tmp_path, shared_cache_dir):
         """read_only=True makes root filesystem read-only."""
         _requires_root()
         _requires_docker()
@@ -1140,7 +1143,7 @@ class TestReadOnly:
             working_dir="/",
             read_only=True,
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="ro-test")
         try:
@@ -1153,7 +1156,7 @@ class TestReadOnly:
         finally:
             sb.delete()
 
-    def test_read_only_survives_reset(self, tmp_path):
+    def test_read_only_survives_reset(self, tmp_path, shared_cache_dir):
         """read_only is preserved after reset()."""
         _requires_root()
         _requires_docker()
@@ -1162,7 +1165,7 @@ class TestReadOnly:
             working_dir="/",
             read_only=True,
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="ro-reset")
         try:
@@ -1174,7 +1177,7 @@ class TestReadOnly:
         finally:
             sb.delete()
 
-    def test_read_only_without_seccomp(self, tmp_path):
+    def test_read_only_without_seccomp(self, tmp_path, shared_cache_dir):
         """read_only works even when seccomp is disabled."""
         _requires_root()
         _requires_docker()
@@ -1184,7 +1187,7 @@ class TestReadOnly:
             read_only=True,
             seccomp=False,
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="ro-nosec")
         try:
@@ -1222,7 +1225,7 @@ class TestGetImageConfig:
 
 
 class TestDeleteCleansBackground:
-    def test_delete_kills_background(self, tmp_path):
+    def test_delete_kills_background(self, tmp_path, shared_cache_dir):
         """delete() should kill background processes before unmounting."""
         _requires_root()
         _requires_docker()
@@ -1230,7 +1233,7 @@ class TestDeleteCleansBackground:
             image=TEST_IMAGE,
             working_dir="/",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         sb = Sandbox(config, name="bg-cleanup")
         sb.run_background("sleep 3600")
