@@ -843,3 +843,198 @@ class TestEdgeCases:
         assert "out" in output
         assert "err" in output
 
+
+# ------------------------------------------------------------------ #
+#  mount_overlay (new mount API + legacy fallback)                     #
+# ------------------------------------------------------------------ #
+
+
+class TestMountOverlay:
+    def test_single_layer(self, tmp_path):
+        """mount_overlay works with a single lowerdir."""
+        _requires_root()
+        from agentdocker_lite._mount import mount_overlay
+
+        lower = tmp_path / "lower"
+        lower.mkdir()
+        (lower / "hello.txt").write_text("hello")
+        upper = tmp_path / "upper"
+        upper.mkdir()
+        work = tmp_path / "work"
+        work.mkdir()
+        merged = tmp_path / "merged"
+        merged.mkdir()
+
+        mount_overlay(str(lower), str(upper), str(work), str(merged))
+        assert (merged / "hello.txt").read_text() == "hello"
+        subprocess.run(["umount", str(merged)], capture_output=True)
+
+    def test_multi_layer(self, tmp_path):
+        """mount_overlay works with multiple lowerdirs (bypasses 256-byte limit)."""
+        _requires_root()
+        from agentdocker_lite._mount import mount_overlay
+
+        # Create 6 layers — this exceeds the 256-byte fsconfig limit
+        layers = []
+        for i in range(6):
+            d = tmp_path / f"layer_{i:03d}_padding_for_length"
+            d.mkdir()
+            (d / f"file_{i}.txt").write_text(f"layer {i}")
+            layers.append(d)
+
+        upper = tmp_path / "upper"
+        upper.mkdir()
+        work = tmp_path / "work"
+        work.mkdir()
+        merged = tmp_path / "merged"
+        merged.mkdir()
+
+        lowerdir = ":".join(str(d) for d in reversed(layers))
+        assert len(lowerdir) > 256, "lowerdir must exceed fsconfig limit"
+
+        mount_overlay(lowerdir, str(upper), str(work), str(merged))
+
+        # All layer files should be visible
+        for i in range(6):
+            assert (merged / f"file_{i}.txt").read_text() == f"layer {i}"
+
+        subprocess.run(["umount", str(merged)], capture_output=True)
+
+    def test_new_api_detection(self):
+        """_check_new_mount_api returns a boolean (True on kernel >= 6.8)."""
+        _requires_root()
+        from agentdocker_lite._mount import _check_new_mount_api
+
+        result = _check_new_mount_api()
+        assert isinstance(result, bool)
+
+
+# ------------------------------------------------------------------ #
+#  Port mapping (pasta networking)                                      #
+# ------------------------------------------------------------------ #
+
+
+class TestPortMap:
+    def test_port_mapping(self, tmp_path):
+        """port_map forwards host port to sandbox server."""
+        _requires_root()
+        _requires_docker()
+        import urllib.request
+
+        config = SandboxConfig(
+            image="python:3.11-slim",
+            working_dir="/tmp",
+            net_isolate=True,
+            port_map=["19876:8000"],
+            seccomp=False,
+            env_base_dir=str(tmp_path / "envs"),
+        )
+        sb = Sandbox(config, name="port-test")
+        try:
+            sb.run_background("python3 -m http.server 8000 --directory /tmp")
+            time.sleep(2)
+
+            # Must use 127.0.0.1 (not localhost) — pasta listens on IPv4 only
+            resp = urllib.request.urlopen("http://127.0.0.1:19876/", timeout=5)
+            assert resp.status == 200
+        finally:
+            sb.delete()
+
+    def test_internal_loopback(self, tmp_path):
+        """Loopback is automatically brought up inside net-isolated sandbox."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image="python:3.11-slim",
+            working_dir="/tmp",
+            net_isolate=True,
+            port_map=["19877:8000"],
+            seccomp=False,
+            env_base_dir=str(tmp_path / "envs"),
+        )
+        sb = Sandbox(config, name="lo-test")
+        try:
+            sb.run_background("python3 -m http.server 8000 --directory /tmp")
+            time.sleep(1)
+
+            sb.write_file("/tmp/lo_check.py",
+                "import urllib.request\n"
+                "r = urllib.request.urlopen('http://127.0.0.1:8000/')\n"
+                "print(r.status)\n"
+            )
+            output, ec = sb.run("python3 /tmp/lo_check.py")
+            assert ec == 0
+            assert "200" in output
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Layer cache                                                          #
+# ------------------------------------------------------------------ #
+
+
+class TestLayerCache:
+    def test_shared_layers(self, tmp_path):
+        """Two images sharing base layers reuse cached layers."""
+        _requires_root()
+        _requires_docker()
+
+        cache_dir = tmp_path / "cache"
+        configs = []
+        sandboxes = []
+        for i, img in enumerate(["python:3.11-slim", "python:3.12-slim"]):
+            config = SandboxConfig(
+                image=img,
+                working_dir="/tmp",
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=str(cache_dir),
+            )
+            sb = Sandbox(config, name=f"layer-test-{i}")
+            configs.append(config)
+            sandboxes.append(sb)
+
+        try:
+            layers0 = set(l.name for l in (sandboxes[0]._layer_dirs or []))
+            layers1 = set(l.name for l in (sandboxes[1]._layer_dirs or []))
+            shared = layers0 & layers1
+            assert len(shared) > 0, "python:3.11 and 3.12 should share base layers"
+
+            # Both should work
+            out0, _ = sandboxes[0].run("python3 --version")
+            out1, _ = sandboxes[1].run("python3 --version")
+            assert "3.11" in out0
+            assert "3.12" in out1
+        finally:
+            for sb in sandboxes:
+                sb.delete()
+
+    def test_multi_layer_image(self, tmp_path):
+        """An image with many layers mounts and works correctly."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image="python:3.11-slim",  # 4 layers
+            working_dir="/tmp",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="multi-layer")
+        try:
+            assert sb._layer_dirs is not None
+            assert len(sb._layer_dirs) >= 4
+
+            output, ec = sb.run("python3 -c 'print(1+1)'")
+            assert ec == 0
+            assert "2" in output
+
+            # Reset should work with multi-layer
+            sb.run("touch /tmp/marker")
+            sb.reset()
+            output, ec = sb.run("test -f /tmp/marker && echo yes || echo no")
+            assert "no" in output
+        finally:
+            sb.delete()
+
