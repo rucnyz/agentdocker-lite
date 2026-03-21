@@ -1347,6 +1347,25 @@ class TestSnapshot:
         with pytest.raises(FileNotFoundError):
             sandbox.restore(999)
 
+    def test_named_snapshot(self, sandbox):
+        """snapshot() accepts string tags."""
+        sandbox.run("echo tagged > /workspace/data.txt")
+        sandbox.snapshot("my_tag")
+        sandbox.run("echo changed > /workspace/data.txt")
+        sandbox.restore("my_tag")
+        out, _ = sandbox.run("cat /workspace/data.txt")
+        assert "tagged" in out
+        assert "my_tag" in [str(s) for s in sandbox.list_snapshots()]
+
+    def test_restore_latest(self, sandbox):
+        """restore() with no args restores to most recent snapshot."""
+        sandbox.run("echo latest > /workspace/data.txt")
+        sandbox.snapshot()
+        sandbox.run("echo modified > /workspace/data.txt")
+        sandbox.restore()
+        out, _ = sandbox.run("cat /workspace/data.txt")
+        assert "latest" in out
+
     def test_tree_branch(self, sandbox):
         """Simulate tree search: branch from a checkpoint."""
         sandbox.run("echo base > /workspace/state.txt")

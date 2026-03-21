@@ -709,70 +709,78 @@ class SandboxBase(abc.ABC):
 
     _snapshot_counter: int = 0
 
-    def snapshot(self) -> int:
-        """Save current filesystem state, returning a snapshot ID.
+    def snapshot(self, tag: str | int | None = None) -> str | int:
+        """Save current filesystem state, returning a snapshot ID or tag.
 
-        Lightweight wrapper over :meth:`fs_snapshot` with automatic
-        path and ID management.  Use :meth:`restore` to return to
-        this state.
+        Args:
+            tag: Optional name for the snapshot (e.g. ``"before_test"``).
+                If ``None``, uses an auto-incrementing integer.
 
         Returns:
-            Snapshot ID (auto-incrementing integer).
+            The tag (str) or auto-assigned ID (int).
         """
         snap_dir = self._env_dir / "snapshots"
         snap_dir.mkdir(parents=True, exist_ok=True)
-        sid = self._snapshot_counter
-        self._snapshot_counter += 1
-        self.fs_snapshot(str(snap_dir / str(sid)))
-        logger.debug("Snapshot %d saved", sid)
-        return sid
 
-    def restore(self, snapshot_id: int) -> None:
+        if tag is None:
+            tag = self._snapshot_counter
+            self._snapshot_counter += 1
+
+        self.fs_snapshot(str(snap_dir / str(tag)))
+        logger.debug("Snapshot saved: %s", tag)
+        return tag
+
+    def restore(self, tag: str | int | None = None) -> None:
         """Restore filesystem to a previously saved snapshot.
 
         Args:
-            snapshot_id: ID returned by :meth:`snapshot`.
+            tag: Snapshot tag or ID. If ``None``, restores to the
+                most recent snapshot.
         """
-        snap_path = self._env_dir / "snapshots" / str(snapshot_id)
+        if tag is None:
+            snaps = self.list_snapshots()
+            if not snaps:
+                raise FileNotFoundError("No snapshots available")
+            tag = snaps[-1]
+
+        snap_path = self._env_dir / "snapshots" / str(tag)
         if not snap_path.exists():
             raise FileNotFoundError(
-                f"Snapshot {snapshot_id} not found. "
+                f"Snapshot {tag!r} not found. "
                 f"Available: {self.list_snapshots()}"
             )
         self.fs_restore(str(snap_path))
-        self._snapshot_counter = snapshot_id + 1
-        logger.debug("Restored to snapshot %d", snapshot_id)
+        if isinstance(tag, int):
+            self._snapshot_counter = tag + 1
+        logger.debug("Restored to snapshot: %s", tag)
 
-    def list_snapshots(self) -> list[int]:
-        """Return sorted list of available snapshot IDs."""
+    def list_snapshots(self) -> list[str | int]:
+        """Return sorted list of available snapshot tags/IDs."""
         snap_dir = self._env_dir / "snapshots"
         if not snap_dir.exists():
             return []
-        return sorted(
-            int(p.name) for p in snap_dir.iterdir()
-            if p.is_dir() and p.name.isdigit()
-        )
+        result: list[str | int] = []
+        for p in sorted(snap_dir.iterdir()):
+            if p.is_dir():
+                result.append(int(p.name) if p.name.isdigit() else p.name)
+        return result
 
-    def delete_snapshot(self, snapshot_id: int) -> None:
-        """Delete a specific snapshot to free disk space.
-
-        Args:
-            snapshot_id: ID returned by :meth:`snapshot`.
-        """
-        snap_path = self._env_dir / "snapshots" / str(snapshot_id)
+    def delete_snapshot(self, tag: str | int) -> None:
+        """Delete a specific snapshot to free disk space."""
+        snap_path = self._env_dir / "snapshots" / str(tag)
         if snap_path.exists():
             shutil.rmtree(snap_path)
-            logger.debug("Deleted snapshot %d", snapshot_id)
+            logger.debug("Deleted snapshot: %s", tag)
 
-    async def asnapshot(self) -> int:
+    async def asnapshot(self, tag: str | int | None = None) -> str | int:
         """Async version of :meth:`snapshot`."""
         import asyncio
-        return await asyncio.to_thread(self.snapshot)
+        return await asyncio.to_thread(self.snapshot, tag)
 
-    async def arestore(self, snapshot_id: int) -> None:
+    async def arestore(self, tag: str | int | None = None) -> None:
         """Async version of :meth:`restore`."""
         import asyncio
-        await asyncio.to_thread(self.restore, snapshot_id)
+        await asyncio.to_thread(self.restore, tag)
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
