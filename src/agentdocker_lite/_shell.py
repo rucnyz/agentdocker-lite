@@ -51,6 +51,7 @@ class _PersistentShell:
         userns_setup_script: Optional[str] = None,
         systemd_scope_properties: Optional[list[str]] = None,
         hostname: Optional[str] = None,
+        read_only: bool = False,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -67,6 +68,7 @@ class _PersistentShell:
         self._userns_setup_script = userns_setup_script
         self._systemd_scope_properties = systemd_scope_properties
         self._hostname = hostname
+        self._read_only = read_only
         self._process: Optional[subprocess.Popen] = None
         self._pidfd: Optional[int] = None
         self._master_fd: Optional[int] = None
@@ -136,10 +138,10 @@ class _PersistentShell:
             rootfs_q = shlex.quote(str(self._rootfs))
 
             # hostname must be set before seccomp (blocks sethostname).
-            # Done before pivot_root with host tools.
+            # Write to /proc directly — doesn't require `hostname` binary.
             hostname_cmd = ""
             if self._hostname:
-                hostname_cmd = f"hostname {shlex.quote(self._hostname)} 2>/dev/null; "
+                hostname_cmd = f"echo {shlex.quote(self._hostname)} > /proc/sys/kernel/hostname; "
 
             seccomp_wrap = "/tmp/.adl_seccomp " if self._seccomp else ""
 
@@ -232,7 +234,7 @@ class _PersistentShell:
         # Security (mask/readonly/seccomp/cap-drop) is handled by adl-seccomp
         # which runs before the shell starts. Init script only does hostname + cd.
         _hostname_snippet = (
-            f"hostname {shlex.quote(self._hostname)} 2>/dev/null\n"
+            f"echo {shlex.quote(self._hostname)} > /proc/sys/kernel/hostname\n"
             if self._hostname else ""
         )
 
@@ -248,8 +250,14 @@ class _PersistentShell:
         else:
             # Rootful: adl-seccomp handles /proc, /dev, mask, readonly,
             # seccomp, cap-drop (all after pivot_root). Init = cd + signal.
+            # When seccomp is off, adl-seccomp doesn't run so /proc isn't
+            # mounted and read_only isn't applied. Handle both here.
+            no_seccomp_init = ""
+            if not self._seccomp:
+                no_seccomp_init = "mount -t proc proc /proc 2>/dev/null\n"
             init_script = (
                 "PS1='' PS2=''\n"
+                + no_seccomp_init
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
@@ -270,6 +278,12 @@ class _PersistentShell:
         # Clean up old root mounts left by pivot_root (rootful mode only).
         if not self._userns:
             self._cleanup_pivot_old()
+
+        # Apply read-only rootfs after shell is ready. When seccomp is on,
+        # adl-seccomp handles this; when off, we do it here (following
+        # runc's ordering: mount /proc/dev → pivot_root → remount ro).
+        if self._read_only and not self._seccomp:
+            self.execute("mount -o remount,ro /", timeout=5)
 
         ns_flags = "user,pid,mount" if self._userns else "pid,mount"
         if self._net_isolate:
@@ -303,10 +317,14 @@ class _PersistentShell:
             return
 
         tmp_dir = self._rootfs / "tmp"
+        bpf_path = tmp_dir / ".adl_seccomp.bpf"
+        # May already be written by _init_rootful (before read-only remount)
+        if bpf_path.exists():
+            return
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         import shutil
-        (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+        bpf_path.write_bytes(bpf_bytes)
         shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
         (tmp_dir / ".adl_seccomp").chmod(0o755)
 

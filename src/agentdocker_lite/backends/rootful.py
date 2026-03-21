@@ -140,16 +140,28 @@ class RootfulSandbox(SandboxBase):
         if config.dns:
             self._write_dns(config.dns)
 
-        # Read-only rootfs: bind-mount on itself then remount ro
+        # Write seccomp files BEFORE read-only remount (they go into
+        # the overlayfs upper layer via the merged rootfs path).
+        if config.seccomp:
+            from agentdocker_lite.security import build_seccomp_bpf
+            bpf_bytes = build_seccomp_bpf()
+            if bpf_bytes:
+                vendor_dir = Path(__file__).parent.parent / "_vendor"
+                helper_src = vendor_dir / "adl-seccomp"
+                if helper_src.exists():
+                    tmp_dir = self._rootfs / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
+
+        # Read-only rootfs: create marker file so adl-seccomp remounts
+        # / ro after mounting /proc and /dev but before seccomp blocks
+        # mount(). Cannot remount here — pivot_root needs writable rootfs.
         if config.read_only:
-            subprocess.run(
-                ["mount", "--bind", str(self._rootfs), str(self._rootfs)],
-                capture_output=True,
-            )
-            subprocess.run(
-                ["mount", "-o", "remount,ro,bind", str(self._rootfs)],
-                capture_output=True,
-            )
+            marker = self._rootfs / "tmp" / ".adl_readonly"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
 
         self._shell = self._detect_shell()
         self._cached_env = self._build_env()
@@ -168,6 +180,7 @@ class RootfulSandbox(SandboxBase):
             landlock_write=config.landlock_write,
             landlock_tcp_ports=config.landlock_tcp_ports,
             hostname=config.hostname,
+            read_only=config.read_only,
         )
         shell_ms = (time.monotonic() - t3) * 1000
 
@@ -955,7 +968,9 @@ class RootfulSandbox(SandboxBase):
     def _unmount_all(self):
         self._unmount_binds()
         if self._fs_backend == "overlayfs" and self._overlay_mounted:
-            subprocess.run(["umount", "-l", str(self._rootfs)], capture_output=True)
+            # Use -R (recursive) to handle stacked mounts (e.g. read_only
+            # adds a ro remount on top of the overlay).
+            subprocess.run(["umount", "-R", "-l", str(self._rootfs)], capture_output=True)
             self._overlay_mounted = False
 
     # ------------------------------------------------------------------ #

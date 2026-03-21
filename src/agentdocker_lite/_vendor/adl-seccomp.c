@@ -132,7 +132,16 @@ static void _main(long argc, char **argv, char **envp) {
             sc5(NR_mount, 0, (long)ro_paths[i], 0, MS_BIND|MS_REMOUNT|MS_RDONLY, 0);
     }
 
-    /* 5. Seccomp BPF from /tmp/.adl_seccomp.bpf */
+    /* 5. Read-only rootfs (before seccomp blocks mount) */
+    {
+        struct kstat st;
+        if (sc2(NR_stat, (long)"/tmp/.adl_readonly", (long)&st) == 0) {
+            sc1(NR_unlink, (long)"/tmp/.adl_readonly");
+            sc5(NR_mount, (long)"/", (long)"/", 0, MS_BIND|MS_REMOUNT|MS_RDONLY, 0);
+        }
+    }
+
+    /* 6. Seccomp BPF from /tmp/.adl_seccomp.bpf */
     int fd = sc2(NR_open, (long)"/tmp/.adl_seccomp.bpf", 0/*O_RDONLY*/);
     if (fd >= 0) {
         long sz = sc3(NR_lseek, fd, 0, 2/*SEEK_END*/);

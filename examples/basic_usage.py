@@ -187,8 +187,48 @@ def demo_layer_cache():
         sb.delete()
 
 
+def demo_port_mapping():
+    """Demonstrate port mapping with pasta networking.
+
+    Starts a Python HTTP server inside a network-isolated sandbox
+    and accesses it from the host via port forwarding.
+    """
+    import urllib.request
+
+    config = SandboxConfig(
+        image="python:3.11-slim",
+        working_dir="/tmp",
+        net_isolate=True,
+        port_map=["18080:8000"],
+    )
+    sb = Sandbox(config, name="port-demo")
+    try:
+        sb.write_file("/tmp/index.html", "<h1>Hello from sandbox!</h1>\n")
+        sb.run_background("python3 -m http.server 8000 --directory /tmp")
+
+        # Poll until server is ready
+        import time
+        for _ in range(20):
+            try:
+                resp = urllib.request.urlopen("http://127.0.0.1:18080/index.html", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            print("  Server did not start")
+            return
+
+        print(f"  HTTP status: {resp.status}")
+        print(f"  Body: {resp.read().decode().strip()}")
+    finally:
+        sb.delete()
+
+
 if __name__ == "__main__":
     main()
     print()
     print("=== Layer Cache Demo ===")
     demo_layer_cache()
+    print()
+    print("=== Port Mapping Demo ===")
+    demo_port_mapping()

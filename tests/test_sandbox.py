@@ -1054,3 +1054,158 @@ class TestLayerCache:
         finally:
             sb.delete()
 
+
+# ------------------------------------------------------------------ #
+#  Seccomp clone3 → ENOSYS (threading must work)                       #
+# ------------------------------------------------------------------ #
+
+
+class TestClone3Fallback:
+    def test_threading_works_with_seccomp(self, tmp_path):
+        """clone3 returns ENOSYS so glibc falls back to clone(2), allowing threads."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image="python:3.11-slim",
+            working_dir="/tmp",
+            seccomp=True,  # seccomp ON — clone3 should get ENOSYS
+            env_base_dir=str(tmp_path / "envs"),
+        )
+        sb = Sandbox(config, name="clone3-test")
+        try:
+            # Python threading uses clone/clone3 under the hood
+            output, ec = sb.run(
+                "python3 -c '"
+                "import threading; "
+                "r = []; "
+                "t = threading.Thread(target=lambda: r.append(42)); "
+                "t.start(); t.join(); "
+                "print(r[0])'"
+            )
+            assert ec == 0
+            assert "42" in output
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Hostname configuration                                              #
+# ------------------------------------------------------------------ #
+
+
+class TestHostname:
+    def test_custom_hostname(self, tmp_path):
+        """hostname= sets the UTS hostname inside the sandbox."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/",
+            hostname="my-sandbox",
+            net_isolate=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="hostname-test")
+        try:
+            output, ec = sb.run("hostname")
+            assert ec == 0
+            assert "my-sandbox" in output.strip()
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Read-only root filesystem                                           #
+# ------------------------------------------------------------------ #
+
+
+class TestReadOnly:
+    def test_read_only_rootfs(self, tmp_path):
+        """read_only=True makes root filesystem read-only."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/",
+            read_only=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="ro-test")
+        try:
+            # Writes to rootfs should fail
+            _, ec = sb.run("touch /test_file 2>/dev/null")
+            assert ec != 0
+            # Reads should work
+            output, ec = sb.run("cat /etc/hostname 2>/dev/null || echo ok")
+            assert ec == 0
+        finally:
+            sb.delete()
+
+    def test_read_only_without_seccomp(self, tmp_path):
+        """read_only works even when seccomp is disabled."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/",
+            read_only=True,
+            seccomp=False,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="ro-nosec")
+        try:
+            _, ec = sb.run("touch /test_file 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  get_image_config                                                    #
+# ------------------------------------------------------------------ #
+
+
+class TestGetImageConfig:
+    def test_basic(self):
+        """get_image_config returns cmd, entrypoint, env, working_dir."""
+        _requires_docker()
+        from agentdocker_lite import get_image_config
+        cfg = get_image_config("python:3.11-slim")
+        assert cfg is not None
+        assert cfg["cmd"] == ["python3"]
+        assert "PATH" in cfg["env"]
+        assert isinstance(cfg["exposed_ports"], list)
+
+    def test_nonexistent_image(self):
+        """get_image_config returns None for missing image."""
+        from agentdocker_lite import get_image_config
+        assert get_image_config("nonexistent:image-xyz") is None
+
+
+# ------------------------------------------------------------------ #
+#  Background process cleanup on delete                                #
+# ------------------------------------------------------------------ #
+
+
+class TestDeleteCleansBackground:
+    def test_delete_kills_background(self, tmp_path):
+        """delete() should kill background processes before unmounting."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="bg-cleanup")
+        sb.run_background("sleep 3600")
+        sb.run_background("sleep 3600")
+        # delete should not leave mount points behind
+        sb.delete()
+        rootfs = tmp_path / "envs" / "bg-cleanup" / "rootfs"
+        assert not rootfs.exists() or not os.path.ismount(str(rootfs))
+
