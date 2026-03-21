@@ -914,11 +914,17 @@ class TestMountOverlay:
 # ------------------------------------------------------------------ #
 
 
+def _requires_tun():
+    if not os.path.exists("/dev/net/tun"):
+        pytest.skip("requires /dev/net/tun (pasta networking)")
+
+
 class TestPortMap:
     def test_port_mapping(self, tmp_path):
         """port_map forwards host port to sandbox server."""
         _requires_root()
         _requires_docker()
+        _requires_tun()
         import urllib.request
 
         config = SandboxConfig(
@@ -945,6 +951,7 @@ class TestPortMap:
     def test_internal_loopback(self, tmp_path):
         """Loopback is automatically brought up inside net-isolated sandbox."""
         _requires_root()
+        _requires_tun()
         _requires_docker()
 
         config = SandboxConfig(
