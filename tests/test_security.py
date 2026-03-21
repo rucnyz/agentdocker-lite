@@ -403,6 +403,37 @@ class TestUserNamespace:
         finally:
             sb.delete()
 
+    def test_port_map(self, tmp_path, shared_cache_dir):
+        """Port mapping works in rootless mode (pasta inside userns)."""
+        import urllib.request
+        import time
+
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        config = SandboxConfig(
+            image="python:3.11-slim",
+            working_dir="/tmp",
+            net_isolate=True,
+            port_map=["19789:8000"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-port")
+        try:
+            sb.run_background("python3 -m http.server 8000 --directory /tmp")
+            for _ in range(20):
+                try:
+                    r = urllib.request.urlopen("http://localhost:19789/", timeout=1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            else:
+                raise AssertionError("server did not start")
+            assert r.status == 200
+        finally:
+            sb.delete()
+
 
 # ------------------------------------------------------------------ #
 #  Device passthrough tests (root mode)                                #
