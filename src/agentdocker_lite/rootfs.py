@@ -99,6 +99,12 @@ def get_image_config(image_name: str) -> dict | None:
         #     "exposed_ports": [8000],
         # }
     """
+    # Ensure image is available locally, pulling if needed
+    try:
+        _pull_or_check_local(image_name)
+    except RuntimeError:
+        return None
+
     result = subprocess.run(
         ["docker", "inspect", "--format", "{{json .Config}}", image_name],
         capture_output=True, text=True,
