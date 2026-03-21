@@ -6,7 +6,7 @@
 pip install -e .
 ```
 
-Requirements: Linux kernel 5.11+, `util-linux` (`unshare`), Python 3.12+. Docker is only needed for auto-exporting rootfs from image names.
+Requirements: Linux kernel 5.11+, `util-linux` (`unshare`), Python 3.12+. No Docker or Podman required — images are pulled directly from registries via built-in OCI client.
 
 The pip package bundles static binaries for `pasta` (port mapping) and `criu` (process checkpointing) in `site-packages/agentdocker_lite/_vendor/`. No extra install needed.
 
