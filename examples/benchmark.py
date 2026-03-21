@@ -507,5 +507,46 @@ def main():
         print(f"  {n:2d}x: Docker {d['cmds_per_sec']:.0f} cmd/s | adl {a['cmds_per_sec']:.0f} cmd/s  {speedup:.1f}x")
 
 
+def bench_port_map():
+    """Compare sandbox creation with and without port_map."""
+    import os
+    from agentdocker_lite import Sandbox, SandboxConfig
+
+    if os.geteuid() != 0:
+        print("  Skipped (requires root)")
+        return
+    if not os.path.exists("/dev/net/tun"):
+        print("  Skipped (requires /dev/net/tun)")
+        return
+
+    N = 5
+    # Without port_map
+    times_no_port = []
+    for i in range(N):
+        t0 = time.monotonic()
+        sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name=f"bench-noport-{i}")
+        times_no_port.append((time.monotonic() - t0) * 1000)
+        sb.delete()
+
+    # With port_map (pasta networking, parallelized)
+    times_port = []
+    for i in range(N):
+        t0 = time.monotonic()
+        sb = Sandbox(SandboxConfig(
+            image=IMAGE, working_dir="/",
+            net_isolate=True, port_map=[f"{19800+i}:8000"],
+        ), name=f"bench-port-{i}")
+        times_port.append((time.monotonic() - t0) * 1000)
+        sb.delete()
+
+    avg_no = sum(times_no_port) / len(times_no_port)
+    avg_port = sum(times_port) / len(times_port)
+    overhead = avg_port - avg_no
+    print(f"  Without port_map:  {avg_no:.1f}ms")
+    print(f"  With port_map:     {avg_port:.1f}ms  (+{overhead:.1f}ms overhead)")
+
+
 if __name__ == "__main__":
     main()
+    print("\n--- Port mapping overhead ---\n")
+    bench_port_map()

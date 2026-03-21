@@ -156,10 +156,22 @@ def prepare_rootfs_layers_from_docker(
     Raises:
         RuntimeError: If layer extraction fails.
     """
+    layers_dir = cache_dir / "layers"
+    layers_dir.mkdir(parents=True, exist_ok=True)
+
+    # Fast path: check manifest from a previous run to skip docker pull
+    # entirely when all layers are already cached.
+    diff_ids = _get_manifest_diff_ids(cache_dir, image_name)
+    if diff_ids:
+        layer_dirs = [layers_dir / _safe_cache_key(did) for did in diff_ids]
+        if all(d.exists() for d in layer_dirs):
+            logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
+            return layer_dirs
+
+    # Need image metadata — pull if requested, then get diff_ids
     if pull:
         _pull_or_check_local(image_name)
 
-    # Get stable content hashes for cache keys
     diff_ids = _get_image_diff_ids(image_name)
     if not diff_ids:
         raise RuntimeError(
@@ -167,10 +179,7 @@ def prepare_rootfs_layers_from_docker(
             f"Ensure Docker is available and the image exists."
         )
 
-    layers_dir = cache_dir / "layers"
-    layers_dir.mkdir(parents=True, exist_ok=True)
-
-    # Check if all layers already cached
+    # Check again with fresh diff_ids (image may have been updated)
     layer_dirs = [layers_dir / _safe_cache_key(did) for did in diff_ids]
     if all(d.exists() for d in layer_dirs):
         logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
@@ -291,6 +300,22 @@ def _extract_single_layer_locked(
         lock_path.unlink()
     except OSError:
         pass
+
+
+def _get_manifest_diff_ids(
+    cache_dir: Path,
+    image_name: str,
+) -> list[str] | None:
+    """Read cached manifest to get diff_ids without docker inspect."""
+    safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
+    manifest_path = cache_dir / "manifests" / f"{safe_name}.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text())
+        return data.get("diff_ids")
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def _write_manifest(
