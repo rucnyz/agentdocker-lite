@@ -135,6 +135,23 @@ SandboxConfig(
 | `sb.reclaim_memory()` | Hint kernel to swap out idle pages |
 | `sb.features` | Dict of active kernel features |
 | `sb.rootfs` | Host path to sandbox rootfs |
+| `await sb.arun(cmd)` | Async version of `run()` |
+| `await sb.areset()` | Async version of `reset()` |
+| `await sb.adelete()` | Async version of `delete()` |
+
+### Async API
+
+All core methods have async variants (`arun`, `areset`, `adelete`) for use in async frameworks (Ray, asyncio-based RL loops):
+
+```python
+async def rollout(i):
+    sb = Sandbox(SandboxConfig(image="ubuntu:22.04"), name=f"worker-{i}")
+    output, ec = await sb.arun("python solve.py")
+    await sb.areset()
+    await sb.adelete()
+
+await asyncio.gather(*(rollout(i) for i in range(100)))
+```
 
 ### Process checkpointing (CRIU)
 
