@@ -129,6 +129,128 @@ def bench_docker_concurrent() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Podman (rootless, same CLI as Docker)
+# ---------------------------------------------------------------------------
+
+PODMAN_CONTAINER = "adl-bench-podman"
+
+def _podman_available() -> bool:
+    return subprocess.run(["podman", "--version"], capture_output=True).returncode == 0
+
+
+def _podman_run(cmd: str) -> str:
+    return subprocess.run(
+        ["podman", "exec", PODMAN_CONTAINER, "bash", "-c", cmd],
+        capture_output=True, text=True,
+    ).stdout
+
+
+def bench_podman() -> dict | None:
+    if not _podman_available():
+        return None
+
+    subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+
+    # Create + start
+    t0 = time.monotonic()
+    subprocess.run(
+        ["podman", "run", "-d", "--name", PODMAN_CONTAINER, IMAGE, "sleep", "infinity"],
+        capture_output=True, check=True,
+    )
+    create_ms = (time.monotonic() - t0) * 1000
+
+    # Per-command latency
+    cmd_times = []
+    for i in range(N_COMMANDS):
+        t0 = time.monotonic()
+        _podman_run(f"echo iteration-{i}")
+        cmd_times.append((time.monotonic() - t0) * 1000)
+    avg_cmd_ms = sum(cmd_times) / len(cmd_times)
+
+    # "Reset" = remove + recreate
+    t0 = time.monotonic()
+    subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+    subprocess.run(
+        ["podman", "run", "-d", "--name", PODMAN_CONTAINER, IMAGE, "sleep", "infinity"],
+        capture_output=True, check=True,
+    )
+    reset_ms = (time.monotonic() - t0) * 1000
+
+    # Delete
+    t0 = time.monotonic()
+    subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+    delete_ms = (time.monotonic() - t0) * 1000
+
+    return {
+        "create_ms": create_ms,
+        "cmd_ms": avg_cmd_ms,
+        "reset_ms": reset_ms,
+        "delete_ms": delete_ms,
+    }
+
+
+def bench_podman_throughput() -> dict | None:
+    if not _podman_available():
+        return None
+    N = 1000
+    subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+    subprocess.run(
+        ["podman", "run", "-d", "--name", PODMAN_CONTAINER, IMAGE, "sleep", "infinity"],
+        capture_output=True, check=True,
+    )
+    t0 = time.monotonic()
+    for i in range(N):
+        _podman_run(f"echo {i}")
+    elapsed = time.monotonic() - t0
+    subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+    return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+
+def bench_podman_reset_loop() -> dict | None:
+    if not _podman_available():
+        return None
+    N = 100
+    t0 = time.monotonic()
+    for i in range(N):
+        subprocess.run(
+            ["podman", "run", "-d", "--name", PODMAN_CONTAINER, IMAGE, "sleep", "infinity"],
+            capture_output=True, check=True,
+        )
+        _podman_run(f"echo episode-{i}")
+        subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+    elapsed = time.monotonic() - t0
+    return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+
+def bench_podman_concurrent() -> dict | None:
+    if not _podman_available():
+        return None
+    from concurrent.futures import ThreadPoolExecutor
+
+    results = {}
+    for n in [4, 8, 16]:
+        def worker(i):
+            name = f"adl-bench-podman-par-{i}"
+            subprocess.run(
+                ["podman", "run", "-d", "--name", name, IMAGE, "sleep", "infinity"],
+                capture_output=True, check=True,
+            )
+            for j in range(10):
+                subprocess.run(
+                    ["podman", "exec", name, "bash", "-c", f"echo {j}"],
+                    capture_output=True,
+                )
+            subprocess.run(["podman", "rm", "-f", name], capture_output=True)
+
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            list(pool.map(worker, range(n)))
+        elapsed = time.monotonic() - t0
+        results[n] = {"total_s": elapsed, "cmds_per_sec": n * 10 / elapsed}
+    return results
+
+
+# ---------------------------------------------------------------------------
 # agentdocker-lite
 # ---------------------------------------------------------------------------
 
@@ -428,11 +550,32 @@ def bench_concurrent() -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    # Cleanup stale container
-    subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True)
+def _docker_available() -> bool:
+    return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
 
-    print(f"Benchmarking with {IMAGE}, {N_COMMANDS} commands each\n")
+
+def main(skip_docker: bool = False, skip_podman: bool = False):
+    # Auto-detect unavailable backends
+    if not skip_docker and not _docker_available():
+        print("Docker not available, skipping")
+        skip_docker = True
+    if not skip_podman and not _podman_available():
+        print("Podman not available, skipping")
+        skip_podman = True
+
+    # Cleanup stale containers
+    if not skip_docker:
+        subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True)
+    if not skip_podman:
+        subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
+
+    print(f"Benchmarking with {IMAGE}, {N_COMMANDS} commands each")
+    backends = ["adl"]
+    if not skip_docker:
+        backends.append("Docker")
+    if not skip_podman:
+        backends.append("Podman")
+    print(f"Backends: {', '.join(backends)}\n")
 
     # Warmup: ensure rootfs is cached (first export is slow)
     from agentdocker_lite import Sandbox, SandboxConfig
@@ -440,25 +583,49 @@ def main():
     _sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name="adl-bench-warmup")
     _sb.delete()
 
-    print("Running Docker benchmark...")
-    docker = bench_docker()
+    docker = None
+    if not skip_docker:
+        print("Running Docker benchmark...")
+        docker = bench_docker()
+
+    podman = None
+    if not skip_podman:
+        print("Running Podman benchmark...")
+        podman = bench_podman()
 
     print("Running agentdocker-lite benchmark...")
     sandbox = bench_sandbox()
 
-    # Results
-    print(f"\n{'':20} {'Docker':>12} {'adl':>12} {'speedup':>10}")
-    print("-" * 56)
+    # Results table
+    cols = []
+    if docker:
+        cols.append(("Docker", docker))
+    if podman:
+        cols.append(("Podman", podman))
+    cols.append(("adl", sandbox))
+
+    header = f"{'':20}" + "".join(f" {name:>12}" for name, _ in cols)
+    if len(cols) > 1:
+        header += "  speedup"
+    print(f"\n{header}")
+    print("-" * len(header))
     for label, key in [
         ("Create", "create_ms"),
         ("Per command (avg)", "cmd_ms"),
         ("Reset", "reset_ms"),
         ("Delete", "delete_ms"),
     ]:
-        d = docker[key]
-        s = sandbox[key]
-        speedup = d / s if s > 0 else float("inf")
-        print(f"{label:20} {d:>10.1f}ms {s:>10.1f}ms {speedup:>9.1f}x")
+        row = f"{label:20}"
+        for _, data in cols:
+            row += f" {data[key]:>10.1f}ms"
+        if len(cols) > 1:
+            # Speedup vs slowest non-adl backend
+            others = [d[key] for name, d in cols if name != "adl"]
+            if others:
+                slowest = max(others)
+                sp = slowest / sandbox[key] if sandbox[key] > 0 else float("inf")
+                row += f"  {sp:.1f}x"
+        print(row)
 
     # CRIU single-op benchmark
     print("\nRunning CRIU checkpoint benchmark...")
@@ -473,38 +640,71 @@ def main():
     print("\n--- Sustained workloads ---\n")
 
     print("Throughput (1000 sequential commands)...")
-    docker_tp = bench_docker_throughput()
+    docker_tp = bench_docker_throughput() if not skip_docker else None
+    podman_tp = bench_podman_throughput() if not skip_podman else None
     adl_tp = bench_throughput()
-    speedup = adl_tp["ops_per_sec"] / docker_tp["ops_per_sec"]
-    print(f"  Docker: {docker_tp['ops_per_sec']:.0f} cmd/s  (avg {docker_tp['avg_ms']:.1f}ms)")
-    print(f"  adl:    {adl_tp['ops_per_sec']:.0f} cmd/s  (avg {adl_tp['avg_ms']:.1f}ms)  {speedup:.1f}x")
+    if docker_tp:
+        print(f"  Docker: {docker_tp['ops_per_sec']:.0f} cmd/s  (avg {docker_tp['avg_ms']:.1f}ms)")
+    if podman_tp:
+        print(f"  Podman: {podman_tp['ops_per_sec']:.0f} cmd/s  (avg {podman_tp['avg_ms']:.1f}ms)")
+    comparisons = []
+    if docker_tp:
+        comparisons.append(f"{adl_tp['ops_per_sec']/docker_tp['ops_per_sec']:.1f}x vs Docker")
+    if podman_tp:
+        comparisons.append(f"{adl_tp['ops_per_sec']/podman_tp['ops_per_sec']:.1f}x vs Podman")
+    print(f"  adl:    {adl_tp['ops_per_sec']:.0f} cmd/s  (avg {adl_tp['avg_ms']:.1f}ms)"
+          + (f"  {', '.join(comparisons)}" if comparisons else ""))
 
-    print("Reset loop (100 run+reset cycles)...")
-    docker_rl = bench_docker_reset_loop()
+    print("\nReset loop (100 cycles)...")
+    print("  Note: Docker/Podman 'reset' = rm + run (no equivalent to overlayfs upper clear)")
+    docker_rl = bench_docker_reset_loop() if not skip_docker else None
+    podman_rl = bench_podman_reset_loop() if not skip_podman else None
     adl_rl = bench_reset_loop()
-    speedup = adl_rl["cycles_per_sec"] / docker_rl["cycles_per_sec"]
-    print(f"  Docker: {docker_rl['cycles_per_sec']:.1f} resets/s  (avg {docker_rl['avg_ms']:.0f}ms)")
-    print(f"  adl:    {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)  {speedup:.1f}x")
+    if docker_rl:
+        print(f"  Docker: {docker_rl['cycles_per_sec']:.1f} resets/s  (avg {docker_rl['avg_ms']:.0f}ms)")
+    if podman_rl:
+        print(f"  Podman: {podman_rl['cycles_per_sec']:.1f} resets/s  (avg {podman_rl['avg_ms']:.0f}ms)")
+    comparisons = []
+    if docker_rl:
+        comparisons.append(f"{adl_rl['cycles_per_sec']/docker_rl['cycles_per_sec']:.1f}x vs Docker")
+    if podman_rl:
+        comparisons.append(f"{adl_rl['cycles_per_sec']/podman_rl['cycles_per_sec']:.1f}x vs Podman")
+    print(f"  adl:    {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)"
+          + (f"  {', '.join(comparisons)}" if comparisons else ""))
 
-    print("Checkpoint loop (50 run+restore cycles)...")
+    print("\nCheckpoint loop (50 run+restore cycles)...")
     cl = bench_checkpoint_loop()
     if cl:
         print(f"  adl:    {cl['cycles_per_sec']:.1f} restores/s  (avg {cl['avg_ms']:.0f}ms)")
-        print("  (Docker checkpoint requires experimental daemon — not benchmarked)")
+        print("  (Docker/Podman checkpoint requires experimental daemon — not benchmarked)")
     else:
         print("  Skipped (requires root + CRIU)")
 
-    print("\n--- A/B comparison (Harbor-style flow) ---\n")
-    bench_ab_comparison()
+    if not skip_docker:
+        print("\n--- A/B comparison (Harbor-style flow) ---\n")
+        bench_ab_comparison()
 
     print("\nConcurrent sandboxes (4/8/16 parallel, 10 cmds each)...")
-    docker_conc = bench_docker_concurrent()
+    docker_conc = bench_docker_concurrent() if not skip_docker else None
+    podman_conc = bench_podman_concurrent() if not skip_podman else None
     adl_conc = bench_concurrent()
     for n in [4, 8, 16]:
-        d = docker_conc[n]
         a = adl_conc[n]
-        speedup = a["cmds_per_sec"] / d["cmds_per_sec"]
-        print(f"  {n:2d}x: Docker {d['cmds_per_sec']:.0f} cmd/s | adl {a['cmds_per_sec']:.0f} cmd/s  {speedup:.1f}x")
+        parts = []
+        if docker_conc:
+            parts.append(f"Docker {docker_conc[n]['cmds_per_sec']:.0f}")
+        if podman_conc:
+            parts.append(f"Podman {podman_conc[n]['cmds_per_sec']:.0f}")
+        parts.append(f"adl {a['cmds_per_sec']:.0f} cmd/s")
+        comparisons = []
+        if docker_conc:
+            comparisons.append(f"{a['cmds_per_sec']/docker_conc[n]['cmds_per_sec']:.1f}x vs Docker")
+        if podman_conc:
+            comparisons.append(f"{a['cmds_per_sec']/podman_conc[n]['cmds_per_sec']:.1f}x vs Podman")
+        line = f"  {n:2d}x: {' | '.join(parts)}"
+        if comparisons:
+            line += f"  {', '.join(comparisons)}"
+        print(line)
 
 
 def bench_port_map():
@@ -547,6 +747,14 @@ def bench_port_map():
 
 
 if __name__ == "__main__":
-    main()
-    print("\n--- Port mapping overhead ---\n")
-    bench_port_map()
+    import argparse
+    parser = argparse.ArgumentParser(description="Benchmark agentdocker-lite vs Docker/Podman")
+    parser.add_argument("--no-docker", action="store_true", help="Skip Docker benchmarks")
+    parser.add_argument("--no-podman", action="store_true", help="Skip Podman benchmarks")
+    parser.add_argument("--no-port-map", action="store_true", help="Skip port mapping benchmark")
+    args = parser.parse_args()
+
+    main(skip_docker=args.no_docker, skip_podman=args.no_podman)
+    if not args.no_port_map:
+        print("\n--- Port mapping overhead ---\n")
+        bench_port_map()
