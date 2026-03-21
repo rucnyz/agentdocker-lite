@@ -84,6 +84,8 @@ BPF_RET = 0x06
 SECCOMP_RET_ALLOW = 0x7FFF0000
 SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_KILL_PROCESS = 0x80000000
+# ENOSYS causes glibc to fall back to the older syscall variant
+SECCOMP_RET_ENOSYS = SECCOMP_RET_ERRNO | 38  # ENOSYS = 38
 
 AUDIT_ARCH_X86_64 = 0xC000003E
 AUDIT_ARCH_AARCH64 = 0xC00000B7
@@ -131,9 +133,14 @@ _BLOCKED_X86_64: dict[str, int] = {
     "io_uring_setup": 425,
     "io_uring_enter": 426,
     "io_uring_register": 427,
-    # clone3 — flags in struct, can't inspect from BPF
-    "clone3": 435,
 }
+
+# clone3 — flags are in a struct (not a register), so BPF can't inspect them.
+# Return ENOSYS instead of EPERM so glibc falls back to clone(2), which we
+# CAN filter by flag.  This allows threading (OpenBLAS, numpy) while still
+# blocking namespace creation via clone(2) flag inspection.
+_CLONE3_X86_64 = 435
+_CLONE3_AARCH64 = 435
 
 _BLOCKED_AARCH64: dict[str, int] = {
     "ptrace": 117,
@@ -166,7 +173,6 @@ _BLOCKED_AARCH64: dict[str, int] = {
     "io_uring_setup": 425,
     "io_uring_enter": 426,
     "io_uring_register": 427,
-    "clone3": 435,
 }
 
 # clone(2) namespace flags — block these via arg-level filtering
@@ -224,28 +230,42 @@ def build_seccomp_bpf() -> bytes | None:
     if machine == "x86_64":
         arch, blocked = AUDIT_ARCH_X86_64, _BLOCKED_X86_64
         clone_nr, ioctl_nr = _CLONE_X86_64, _IOCTL_X86_64
+        clone3_nr = _CLONE3_X86_64
     elif machine in ("aarch64", "arm64"):
         arch, blocked = AUDIT_ARCH_AARCH64, _BLOCKED_AARCH64
         clone_nr, ioctl_nr = _CLONE_AARCH64, _IOCTL_AARCH64
+        clone3_nr = _CLONE3_AARCH64
     else:
         return None
 
     syscall_nrs = sorted(blocked.values())
     insns: list[_SockFilterInsn] = []
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4))
+
+    # 1. Check architecture
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4))         # load arch
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0))
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+
+    # 2. clone(2): allow threads, block namespace creation
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))         # load syscall nr
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone_nr, 0, 4))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))        # load arg0 (flags)
     insns.append(_bpf_jump(BPF_JMP | BPF_JSET | BPF_K, _CLONE_NS_FLAGS, 0, 1))
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))  # EPERM
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))         # reload syscall nr
+
+    # 3. clone3: return ENOSYS so glibc falls back to clone(2)
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone3_nr, 0, 1))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ENOSYS))
+
+    # 4. ioctl(TIOCSTI): block terminal injection
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, ioctl_nr, 0, 4))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))        # load arg1
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, _TIOCSTI, 0, 1))
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))         # reload syscall nr
+
+    # 5. Block dangerous syscalls
     for i, nr in enumerate(syscall_nrs):
         insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, len(syscall_nrs) - i, 0))
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW))
@@ -259,6 +279,7 @@ def apply_seccomp_filter() -> bool:
 
     - Wrong arch (x32/compat) → KILL_PROCESS
     - clone() with namespace flags → EPERM
+    - clone3() → ENOSYS (glibc falls back to clone, which we can filter)
     - ioctl(TIOCSTI) → EPERM
     - Blocked syscalls → EPERM
     - Everything else → ALLOW
@@ -273,11 +294,13 @@ def apply_seccomp_filter() -> bool:
         blocked = _BLOCKED_X86_64
         clone_nr = _CLONE_X86_64
         ioctl_nr = _IOCTL_X86_64
+        clone3_nr = _CLONE3_X86_64
     elif machine in ("aarch64", "arm64"):
         arch = AUDIT_ARCH_AARCH64
         blocked = _BLOCKED_AARCH64
         clone_nr = _CLONE_AARCH64
         ioctl_nr = _IOCTL_AARCH64
+        clone3_nr = _CLONE3_AARCH64
     else:
         logger.warning("seccomp: unsupported arch %s, skipping", machine)
         return False
@@ -293,34 +316,32 @@ def apply_seccomp_filter() -> bool:
     # --- 2. Load syscall number ---
     insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
 
-    # --- 3. clone() arg-level filter: allow fork/threads, block NS flags ---
-    # if syscall == clone: load arg0 (flags), check NS bits
+    # --- 3. clone(2): allow fork/threads, block NS flags ---
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone_nr, 0, 4))
-    # Load clone flags (arg0 = seccomp_data.args[0], offset 16)
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
-    # JSET: if any NS flag is set → EPERM
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))  # load arg0 (flags)
     insns.append(_bpf_jump(BPF_JMP | BPF_JSET | BPF_K, _CLONE_NS_FLAGS, 0, 1))
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
-    # NS flags not set → allow (reload syscall nr for subsequent checks)
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))  # EPERM
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))  # reload syscall nr
 
-    # --- 4. ioctl(TIOCSTI) filter: block terminal injection ---
+    # --- 4. clone3: ENOSYS → glibc falls back to clone(2) ---
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone3_nr, 0, 1))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ENOSYS))
+
+    # --- 5. ioctl(TIOCSTI): block terminal injection ---
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, ioctl_nr, 0, 4))
     insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))  # arg0 = ioctl cmd
     insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, _TIOCSTI, 0, 1))
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
     insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))  # reload syscall nr
 
-    # --- 5. Simple blocklist ---
-    # Each check: if match → jump to EPERM (at end), else fall through to next check
-    # EPERM is at: remaining_checks + 1 (skip remaining checks + ALLOW)
+    # --- 6. Simple blocklist ---
     for i, nr in enumerate(syscall_nrs):
-        jump_to_eperm = len(syscall_nrs) - i  # skip remaining checks + ALLOW stmt
+        jump_to_eperm = len(syscall_nrs) - i
         insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, jump_to_eperm, 0))
 
-    # --- 6. Default: allow ---
+    # --- 7. Default: allow ---
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW))
-    # --- 7. Block: EPERM ---
+    # --- 8. Block: EPERM ---
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
 
     # Install filter

@@ -173,7 +173,14 @@ class RootfulSandbox(SandboxBase):
 
         self._bg_handles: dict[str, str] = {}  # handle -> pid
         self._pasta_process = None
-        self._start_pasta()
+        self._pasta_thread = None
+        self._pasta_error: Exception | None = None
+        if config.port_map and config.net_isolate:
+            import threading
+            self._pasta_thread = threading.Thread(
+                target=self._start_pasta, daemon=True,
+            )
+            self._pasta_thread.start()
 
         if config.oom_score_adj is not None:
             self._apply_oom_score_adj(config.oom_score_adj)
@@ -198,6 +205,12 @@ class RootfulSandbox(SandboxBase):
             for k, v in self.features.items()
             if v
         )
+        # Wait for pasta networking to finish (started in background thread)
+        if self._pasta_thread is not None:
+            self._pasta_thread.join()
+            if self._pasta_error is not None:
+                raise self._pasta_error
+
         logger.info(
             "Sandbox ready: name=%s rootfs=%s fs=%s features=[%s] "
             "[setup: fs=%.1fms cgroup=%.1fms volumes=%.1fms shell=%.1fms]",
@@ -1101,6 +1114,9 @@ class RootfulSandbox(SandboxBase):
     def _start_pasta(self) -> None:
         """Start pasta for NAT'd networking with port mapping.
 
+        Thread-safe: captures exceptions in ``self._pasta_error`` when
+        run from a background thread.
+
         Mirrors Podman's pasta invocation (containers/common
         ``libnetwork/pasta/pasta_linux.go``):
 
@@ -1110,6 +1126,14 @@ class RootfulSandbox(SandboxBase):
         3. Disable all automatic port forwarding (``-t none`` etc.)
         4. Let pasta daemonize (no ``-f``)
         """
+        try:
+            self._start_pasta_impl()
+        except Exception as e:
+            self._pasta_error = e
+            if self._pasta_thread is None:
+                raise  # Not in a thread — raise immediately
+
+    def _start_pasta_impl(self) -> None:
         port_map = self._config.port_map
         if not port_map:
             return
