@@ -128,10 +128,10 @@ SandboxConfig(
 | `sb.check_background(handle)` | Check output and status |
 | `sb.list_background()` | List all background processes |
 | `sb.stop_background(handle)` | Stop a background process |
-| `sb.snapshot()` | Save filesystem state, returns snapshot ID |
-| `sb.restore(sid)` | Restore to a previous snapshot |
-| `sb.list_snapshots()` | List available snapshot IDs |
-| `sb.delete_snapshot(sid)` | Delete a snapshot |
+| `sb.snapshot("tag")` | Save filesystem state (tag optional, auto-ID if omitted) |
+| `sb.restore("tag")` | Restore to a snapshot (omit for latest) |
+| `sb.list_snapshots()` | List available snapshot tags/IDs |
+| `sb.delete_snapshot("tag")` | Delete a snapshot |
 | `sb.save_as_image(name)` | Export sandbox as Docker image |
 | `sb.pressure()` | cgroup v2 PSI (cpu/memory/io) |
 | `sb.reclaim_memory()` | Hint kernel to swap out idle pages |
@@ -146,18 +146,22 @@ SandboxConfig(
 Save and restore filesystem state at any point. Useful for tree search, partial rollback, and best-of-N exploration:
 
 ```python
-sb.run("echo base > /workspace/state.txt")
-branch = sb.snapshot()
+# Named snapshots (like Docker tags)
+sb.snapshot("before_test")
+sb.run("risky change")
+sb.restore("before_test")        # rollback by name
 
-# Try action A
-sb.run("echo action_a >> /workspace/state.txt")
+# Auto-ID snapshots
+sb.snapshot()                     # → 0
+sb.snapshot()                     # → 1
+sb.restore()                     # restore to latest (1)
+sb.restore(0)                    # restore to specific ID
 
-# Rollback and try action B
-sb.restore(branch)
-sb.run("echo action_b >> /workspace/state.txt")
-
-sb.list_snapshots()     # [0]
-sb.delete_snapshot(0)   # free space
+# Tree search
+branch = sb.snapshot("branch_point")
+sb.run("action_a")               # try A
+sb.restore("branch_point")       # rollback
+sb.run("action_b")               # try B
 ```
 
 ### Async API
