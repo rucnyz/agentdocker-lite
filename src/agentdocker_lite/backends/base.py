@@ -799,6 +799,16 @@ class SandboxBase(abc.ABC):
                     capture_output=True,
                 )
 
+            # Clean up netns bind mount left by pasta
+            netns_path = Path(f"/run/netns/adl-{entry.name}")
+            if netns_path.exists():
+                subprocess.run(["fuser", "-k", str(netns_path)], capture_output=True)
+                subprocess.run(["umount", str(netns_path)], capture_output=True)
+                try:
+                    netns_path.unlink()
+                except OSError:
+                    pass
+
             # Remove cgroup
             cgroup_path = Path(f"/sys/fs/cgroup/agentdocker_lite/{entry.name}")
             if cgroup_path.exists():

@@ -1213,19 +1213,12 @@ class RootfulSandbox(SandboxBase):
         We also kill any remaining pasta process bound to our netns.
         """
         netns_path = getattr(self, "_netns_path", None)
-        if netns_path:
-            # Kill any pasta process using our netns (daemonized PID differs
-            # from the original Popen PID due to fork)
-            subprocess.run(
-                ["fuser", "-k", netns_path],
-                capture_output=True,
-            )
-            if os.path.exists(netns_path):
-                subprocess.run(["umount", netns_path], capture_output=True)
-                try:
-                    os.unlink(netns_path)
-                except OSError:
-                    pass
+        if netns_path and os.path.exists(netns_path):
+            subprocess.run(["umount", "-l", netns_path], capture_output=True)
+            try:
+                os.unlink(netns_path)
+            except OSError:
+                pass
             self._netns_path = None
         self._pasta_process = None
 
