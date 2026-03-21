@@ -25,8 +25,9 @@ Lightweight Linux namespace sandbox with persistent shell and instant filesystem
 
 - Linux kernel 5.11+
 - `util-linux` (`unshare`)
-- Python >= 3.10
-- Docker (only for auto-preparing rootfs from image names)
+- Python >= 3.12
+
+No Docker or Podman required. Images are pulled directly from container registries via built-in OCI client. If Docker/Podman is available, it's used for faster local cache hits.
 
 The pip package bundles static binaries for `pasta` (port mapping) and `criu` (process checkpointing) — no extra install needed.
 
