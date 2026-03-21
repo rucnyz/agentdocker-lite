@@ -81,6 +81,59 @@ def _get_image_diff_ids(image_name: str) -> list[str] | None:
         return None
 
 
+def get_image_config(image_name: str) -> dict | None:
+    """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker image.
+
+    Returns a dict with keys: ``cmd``, ``entrypoint``, ``env``,
+    ``working_dir``, ``exposed_ports``.  Returns ``None`` if the
+    image cannot be inspected.
+
+    Example::
+
+        cfg = get_image_config("my-env:latest")
+        # cfg = {
+        #     "cmd": ["uvicorn", "app:app", "--host", "0.0.0.0"],
+        #     "entrypoint": None,
+        #     "env": {"PATH": "...", "MY_VAR": "value"},
+        #     "working_dir": "/app",
+        #     "exposed_ports": [8000],
+        # }
+    """
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .Config}}", image_name],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        config = json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    # Parse env list ["KEY=VALUE", ...] into dict
+    env_dict: dict[str, str] = {}
+    for entry in config.get("Env") or []:
+        key, _, value = entry.partition("=")
+        env_dict[key] = value
+
+    # Parse ExposedPorts {"8000/tcp": {}, ...} into list of ints
+    ports: list[int] = []
+    for port_proto in config.get("ExposedPorts") or {}:
+        port_str = port_proto.split("/")[0]
+        try:
+            ports.append(int(port_str))
+        except ValueError:
+            pass
+
+    return {
+        "cmd": config.get("Cmd"),
+        "entrypoint": config.get("Entrypoint"),
+        "env": env_dict,
+        "working_dir": config.get("WorkingDir") or None,
+        "exposed_ports": ports,
+    }
+
+
 def prepare_rootfs_layers_from_docker(
     image_name: str,
     cache_dir: Path,
