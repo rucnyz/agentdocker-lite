@@ -168,7 +168,11 @@ chmod 1777 ${merged}/tmp 2>/dev/null || true
 
 The setup script had already correctly set up `/dev` (bind-mounting from host) and `/dev/pts`, but `adl-seccomp` overwrote everything.
 
-**Fix:** Skip `adl-seccomp` in userns mode. The setup script already handles `/proc`, `/dev`, and volume mounts. Additionally, mount `devpts` in the setup script (previously only done by `adl-seccomp`):
+**Fix (original):** Skip `adl-seccomp` in userns mode. The setup script already handles `/proc`, `/dev`, and volume mounts.
+
+**Fix (current):** adl-seccomp now supports a `/tmp/.adl_skip_dev` marker file. When present, it skips `/proc`+`/dev` mount (setup script handles these) but keeps capability drop, path masking, read-only paths, and seccomp BPF. This gives rootless mode full security hardening.
+
+Additionally, mount `devpts` in the setup script (previously only done by `adl-seccomp`):
 ```bash
 mount -t devpts devpts ${merged}/dev/pts -o nosuid,newinstance,ptmxmode=0666
 ln -sf pts/ptmx ${merged}/dev/ptmx
@@ -176,7 +180,7 @@ ln -sf pts/ptmx ${merged}/dev/ptmx
 
 **File changed:** `rootful.py` (`_generate_userns_setup_script`)
 
-**TODO:** Re-implement seccomp BPF and capability drop for userns mode via Python's `security.py` (currently skipped when `adl-seccomp` is bypassed).
+**DONE:** seccomp BPF, capability drop, masked paths, and read-only paths are now all active in rootless mode via the `adl_skip_dev` mechanism.
 
 ## Fix 5: `ExecResult.stderr` Must Be String (SkyRL side)
 

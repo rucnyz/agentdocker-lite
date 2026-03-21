@@ -45,7 +45,12 @@ sb.reset()   # instant filesystem reset (~12ms)
 sb.delete()  # full cleanup
 ```
 
-No `sudo` required. The sandbox automatically uses user namespaces for full isolation (overlayfs, PID/UTS/IPC namespace, chroot) without root.
+No `sudo` required. The sandbox automatically uses user namespaces for full isolation without root:
+
+- **Overlayfs + layer cache**: Docker image layers are cached and shared (same as rootful mode)
+- **Namespaces**: PID, mount, UTS, IPC, network (all via user namespace)
+- **Security**: seccomp-bpf, capability drop, masked/read-only paths — all enabled in rootless mode
+- **Port mapping**: pasta networking works inside the user namespace (rootless-compatible)
 
 ## Volumes
 
