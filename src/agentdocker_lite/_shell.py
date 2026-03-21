@@ -52,6 +52,7 @@ class _PersistentShell:
         systemd_scope_properties: Optional[list[str]] = None,
         hostname: Optional[str] = None,
         read_only: bool = False,
+        subuid_range: Optional[tuple[int, int, int]] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -69,6 +70,7 @@ class _PersistentShell:
         self._systemd_scope_properties = systemd_scope_properties
         self._hostname = hostname
         self._read_only = read_only
+        self._subuid_range = subuid_range  # (outer_id, sub_start, sub_count) or None
         self._process: Optional[subprocess.Popen] = None
         self._pidfd: Optional[int] = None
         self._master_fd: Optional[int] = None
@@ -93,14 +95,40 @@ class _PersistentShell:
         if self._userns:
             # User namespace mode: setup script handles mount/chroot,
             # stdin is used for phase 2 init (post-chroot).
+            use_full_mapping = self._subuid_range is not None
+
             unshare_cmd: list[str] = [
-                "unshare", "--user", "--map-root-user",
+                "unshare", "--user",
+            ]
+            if not use_full_mapping:
+                # Fallback: only map current uid → root (no apt-get, useradd, etc.)
+                unshare_cmd.append("--map-root-user")
+
+            unshare_cmd.extend([
                 "--pid", "--mount", "--propagation", "slave",
                 "--uts", "--ipc",
-            ]
+            ])
             if self._net_isolate:
                 unshare_cmd.append("--net")
-            unshare_cmd.extend(["--fork", "bash", str(self._userns_setup_script)])
+
+            if use_full_mapping:
+                # With full uid mapping, we need synchronization:
+                # 1. Child starts in new user namespace (no mapping yet)
+                # 2. Child blocks on a sync pipe
+                # 3. Parent calls newuidmap/newgidmap to set full mapping
+                # 4. Parent signals child by closing the pipe
+                # 5. Child continues with setup script (mount, chroot, etc.)
+                sync_r, sync_w = os.pipe()
+                wrapper = (
+                    f"exec 3<&{sync_r}; exec {sync_r}<&-; "
+                    f"read -n1 <&3; exec 3<&-; "
+                    f"exec bash {shlex.quote(str(self._userns_setup_script))}"
+                )
+                unshare_cmd.extend(["--fork", "bash", "-c", wrapper])
+                self._sync_fds = (sync_r, sync_w)
+            else:
+                unshare_cmd.extend(["--fork", "bash", str(self._userns_setup_script)])
+                self._sync_fds = None
 
             # Wrap in systemd-run --user --scope for cgroup delegation
             if self._systemd_scope_properties:
@@ -195,6 +223,11 @@ class _PersistentShell:
         # The sandbox env is applied inside the chroot via the init_script.
         popen_env = None if self._systemd_scope_properties else self._env
 
+        # Collect fds to pass to child
+        _pass_fds = [signal_w]
+        if self._userns and getattr(self, "_sync_fds", None):
+            _pass_fds.append(self._sync_fds[0])  # sync_r
+
         if self._tty:
             master_fd, slave_fd = pty_mod.openpty()
             # Disable echo so input doesn't pollute output.
@@ -210,7 +243,7 @@ class _PersistentShell:
                 env=popen_env,
                 bufsize=0,
                 preexec_fn=preexec_fn,
-                pass_fds=(signal_w,),
+                pass_fds=tuple(_pass_fds),
                 start_new_session=True,
             )
             os.close(slave_fd)
@@ -224,13 +257,67 @@ class _PersistentShell:
                 env=popen_env,
                 bufsize=0,
                 preexec_fn=preexec_fn,
-                pass_fds=(signal_w,),
+                pass_fds=tuple(_pass_fds),
                 start_new_session=True,
             )
 
         # Close write end in parent -- only the child should write to it.
         os.close(signal_w)
         self._signal_w = None
+
+        # Full uid/gid mapping via newuidmap/newgidmap
+        if self._userns and getattr(self, "_sync_fds", None):
+            sync_r, sync_w = self._sync_fds
+            os.close(sync_r)  # Close read end in parent
+
+            pid = self._process.pid
+            outer_uid, sub_start, sub_count = self._subuid_range
+
+            # Wait for the child to enter the new user namespace
+            my_userns = os.readlink("/proc/self/ns/user")
+            for _ in range(1000):  # 1000 * 1ms = 1s max
+                try:
+                    child_userns = os.readlink(f"/proc/{pid}/ns/user")
+                    if child_userns != my_userns:
+                        break
+                except (FileNotFoundError, PermissionError):
+                    pass
+                time.sleep(0.001)
+            else:
+                os.close(sync_w)
+                raise RuntimeError(
+                    f"Timed out waiting for user namespace creation (pid={pid})"
+                )
+
+            # Write full uid and gid mappings
+            outer_gid = os.getgid()
+            try:
+                subprocess.run(
+                    ["newuidmap", str(pid),
+                     "0", str(outer_uid), "1",
+                     "1", str(sub_start), str(sub_count)],
+                    check=True, capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["newgidmap", str(pid),
+                     "0", str(outer_gid), "1",
+                     "1", str(sub_start), str(sub_count)],
+                    check=True, capture_output=True, text=True,
+                )
+            except subprocess.CalledProcessError as e:
+                os.close(sync_w)
+                raise RuntimeError(
+                    f"Failed to set uid/gid mapping: {e.stderr.strip()}"
+                ) from e
+
+            logger.debug(
+                "Full uid mapping set for pid %d: 0→%d, 1-%d→%d-%d",
+                pid, outer_uid, sub_count, sub_start, sub_start + sub_count - 1,
+            )
+
+            # Signal child to proceed (close pipe → child's read returns EOF)
+            os.close(sync_w)
+            self._sync_fds = None
 
         # Security (mask/readonly/seccomp/cap-drop) is handled by adl-seccomp
         # which runs before the shell starts. Init script only does hostname + cd.

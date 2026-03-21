@@ -345,6 +345,9 @@ class RootfulSandbox(SandboxBase):
 
         self._cached_env = self._build_env()
 
+        # --- detect subordinate uid range for full mapping -----------------
+        subuid_range = self._detect_subuid_range()
+
         # --- start persistent shell ---------------------------------------
         t0 = time.monotonic()
         self._persistent_shell = _PersistentShell(
@@ -358,6 +361,7 @@ class RootfulSandbox(SandboxBase):
             userns_setup_script=str(setup_script_path),
             systemd_scope_properties=self._systemd_scope_properties or None,
             hostname=config.hostname,
+            subuid_range=subuid_range,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 
@@ -449,6 +453,16 @@ class RootfulSandbox(SandboxBase):
             f"ln -sf /proc/self/fd/1 {merged}/dev/stdout 2>/dev/null || true",
             f"ln -sf /proc/self/fd/2 {merged}/dev/stderr 2>/dev/null || true",
             f"mkdir -p {merged}/dev/pts {merged}/dev/shm 2>/dev/null || true",
+            f"mount -t devpts devpts {merged}/dev/pts -o nosuid,newinstance,ptmxmode=0666 2>/dev/null || true",
+            f"ln -sf pts/ptmx {merged}/dev/ptmx 2>/dev/null || true",
+            "",
+            "# Propagate DNS: copy host resolv.conf if sandbox one is empty/missing",
+            f"if [ ! -s {merged}/etc/resolv.conf ] && [ -s /etc/resolv.conf ]; then",
+            f"  cp /etc/resolv.conf {merged}/etc/resolv.conf 2>/dev/null || true",
+            "fi",
+            "",
+            "# Ensure /tmp has standard permissions (Docker exports may lose them)",
+            f"chmod 1777 {merged}/tmp 2>/dev/null || true",
             "",
         ])
 
@@ -478,11 +492,13 @@ class RootfulSandbox(SandboxBase):
                 if mode == "ro":
                     lines.append(f"mount -o remount,ro,bind {target}")
 
-        # Enter chroot — adl-seccomp does cap drop + mask + readonly + seccomp
-        if self._config.seccomp:
-            lines.extend(["", f"exec chroot {merged} /tmp/.adl_seccomp {shell}{norc}"])
-        else:
-            lines.extend(["", f"exec chroot {merged} {shell}{norc}"])
+        # Enter chroot.
+        # In userns mode, skip adl-seccomp: it re-mounts /dev as empty tmpfs
+        # and uses mknod (which fails in userns), breaking /dev/null etc.
+        # The setup script above already mounted /proc, /dev (with bind-mount
+        # devices), and volumes correctly.
+        # TODO: apply seccomp BPF + cap drop via Python security.py in userns
+        lines.extend(["", f"exec chroot {merged} {shell}{norc}"])
 
         script_path = self._env_dir / "setup.sh"
         script_path.write_text("\n".join(lines) + "\n")
@@ -508,6 +524,61 @@ class RootfulSandbox(SandboxBase):
                 "  sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
                 f"Error: {result.stderr.decode().strip()}"
             )
+
+    @staticmethod
+    def _detect_subuid_range() -> Optional[tuple[int, int, int]]:
+        """Detect subordinate UID range for full uid mapping in user namespaces.
+
+        Checks for newuidmap/newgidmap and /etc/subuid entry for the current user.
+        Returns (outer_uid, sub_start, sub_count) if available, None otherwise.
+        When None, the sandbox falls back to --map-root-user (only uid 0 mapped).
+        """
+        if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
+            logger.debug(
+                "newuidmap/newgidmap not found. Install uidmap package for full "
+                "uid mapping (enables apt-get, useradd, etc. inside sandbox). "
+                "Falling back to root-only mapping."
+            )
+            return None
+
+        import getpass
+        try:
+            username = getpass.getuser()
+        except Exception:
+            return None
+
+        uid = os.getuid()
+
+        # Parse /etc/subuid for the current user
+        try:
+            with open("/etc/subuid") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split(":")
+                    if len(parts) != 3:
+                        continue
+                    # Match by username or UID
+                    if parts[0] == username or parts[0] == str(uid):
+                        sub_start = int(parts[1])
+                        sub_count = int(parts[2])
+                        logger.debug(
+                            "Full uid mapping available: %s:%d:%d",
+                            username, sub_start, sub_count,
+                        )
+                        return (uid, sub_start, sub_count)
+        except FileNotFoundError:
+            pass
+
+        logger.debug(
+            "No /etc/subuid entry for %s. For full uid mapping, run:\n"
+            "  echo '%s:%d:65536' | sudo tee -a /etc/subuid\n"
+            "  echo '%s:%d:65536' | sudo tee -a /etc/subgid\n"
+            "Falling back to root-only mapping.",
+            username, username, 200000, username, 200000,
+        )
+        return None
 
     # ------------------------------------------------------------------ #
     #  Public API -- reset / delete                                        #
