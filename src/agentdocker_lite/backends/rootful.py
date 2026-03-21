@@ -916,6 +916,8 @@ class RootfulSandbox(SandboxBase):
         # We run as root, so pasta would drop to nobody and lose CAP_SYS_ADMIN
         # for setns().  --runas 0:0 keeps root (safe: pasta runs in our netns).
         cmd: list[str] = [pasta_bin, "--config-net", "--runas", "0:0"]
+        if not self._config.ipv6:
+            cmd.append("--ipv4-only")
 
         # Explicit port mappings
         has_tcp = False

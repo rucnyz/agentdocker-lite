@@ -138,6 +138,19 @@ config = SandboxConfig(
 
 Uses a vendored `pasta` binary (bundled, no install needed). The sandbox gets an isolated network namespace with NAT'd internet access and TCP port forwarding.
 
+By default, IPv6 is disabled in the pasta network (`ipv6=False`). This ensures `localhost` resolves to `127.0.0.1` and works correctly for port-mapped services. Without this, pasta accepts IPv6 connections (via `::1`) but cannot forward them to IPv4-only servers, causing "Connection reset by peer" — a [known pasta bug](https://bugs.passt.top/show_bug.cgi?id=131) that also affects Podman rootless.
+
+To enable IPv6 networking (e.g., for services that require IPv6):
+
+```python
+config = SandboxConfig(
+    ...,
+    net_isolate=True,
+    port_map=["8080:80"],
+    ipv6=True,  # enables IPv6, but localhost may fail — use 127.0.0.1
+)
+```
+
 ## Filesystem snapshots
 
 Save and restore sandbox filesystem state:

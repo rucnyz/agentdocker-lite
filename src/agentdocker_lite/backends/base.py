@@ -107,6 +107,8 @@ class SandboxConfig:
     dns: Optional[list[str]] = None
     read_only: bool = False
     port_map: Optional[list[str]] = None
+    ipv6: bool = False  # pasta IPv4-only by default; localhost works.
+    # Set True for IPv6 networking (localhost may fail — use 127.0.0.1).
     landlock_read: Optional[list[str]] = None
     landlock_write: Optional[list[str]] = None
     landlock_tcp_ports: Optional[list[int]] = None
