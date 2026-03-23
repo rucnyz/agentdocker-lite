@@ -305,46 +305,8 @@ class RootfulSandbox(SandboxBase):
                 wd = self._upper_dir / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
-            # Re-write seccomp helper to upper
-            if self._config.fast_reset and getattr(self, "_cached_bpf", None):
-                tmp_dir = self._upper_dir / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_seccomp.bpf").write_bytes(self._cached_bpf)
-                (tmp_dir / ".adl_skip_dev").touch()
-                if self._cached_helper_bytes:
-                    (tmp_dir / ".adl_seccomp").write_bytes(self._cached_helper_bytes)
-                    (tmp_dir / ".adl_seccomp").chmod(0o755)
-            elif self._config.seccomp:
-                from agentdocker_lite.security import build_seccomp_bpf
-                bpf_bytes = build_seccomp_bpf()
-                if bpf_bytes:
-                    tmp_dir = self._upper_dir / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                    (tmp_dir / ".adl_skip_dev").touch()
-                    vendor_dir = Path(__file__).parent.parent / "_vendor"
-                    helper_src = vendor_dir / "adl-seccomp"
-                    if helper_src.exists():
-                        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                        (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-            # Re-write Landlock config to upper
-            if self._config.fast_reset and getattr(self, "_cached_landlock_config", None):
-                tmp_dir = self._upper_dir / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(self._cached_landlock_config)
-            else:
-                ll_config = self._build_landlock_config(self._config)
-                if ll_config:
-                    tmp_dir = self._upper_dir / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    (tmp_dir / ".adl_landlock").write_text(ll_config)
-
-            # Re-create read_only marker (cleared by upper dir wipe)
-            if self._config.read_only and self._config.seccomp:
-                marker = self._upper_dir / "tmp" / ".adl_readonly"
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch()
+            # userns: seccomp writes go to upper_dir (host-visible)
+            self._write_security_files(self._upper_dir, skip_dev=True)
         else:
             self._unmount_binds()
             if self._fs_backend == "btrfs":
@@ -356,44 +318,8 @@ class RootfulSandbox(SandboxBase):
                 wd = self._rootfs / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
-            # Re-write seccomp + read_only marker after overlayfs reset
-            if self._config.fast_reset and self._cached_bpf:
-                # Fast path: use cached bytes (skip build_seccomp_bpf + copy2)
-                tmp_dir = self._rootfs / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_seccomp.bpf").write_bytes(self._cached_bpf)
-                if self._cached_helper_bytes:
-                    (tmp_dir / ".adl_seccomp").write_bytes(self._cached_helper_bytes)
-                    (tmp_dir / ".adl_seccomp").chmod(0o755)
-            elif self._config.seccomp:
-                # Original path: rebuild from scratch
-                from agentdocker_lite.security import build_seccomp_bpf
-                bpf_bytes = build_seccomp_bpf()
-                if bpf_bytes:
-                    vendor_dir = Path(__file__).parent.parent / "_vendor"
-                    helper_src = vendor_dir / "adl-seccomp"
-                    if helper_src.exists():
-                        tmp_dir = self._rootfs / "tmp"
-                        tmp_dir.mkdir(parents=True, exist_ok=True)
-                        (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                        (tmp_dir / ".adl_seccomp").chmod(0o755)
-            if self._config.read_only and self._config.seccomp:
-                marker = self._rootfs / "tmp" / ".adl_readonly"
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch()
-
-            # Re-write Landlock config after overlayfs reset
-            if self._config.fast_reset and self._cached_landlock_config:
-                tmp_dir = self._rootfs / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(self._cached_landlock_config)
-            else:
-                ll_config = self._build_landlock_config(self._config)
-                if ll_config:
-                    tmp_dir = self._rootfs / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    (tmp_dir / ".adl_landlock").write_text(ll_config)
+            # rootful: seccomp writes go to rootfs (overlay merged view)
+            self._write_security_files(self._rootfs)
 
         self._persistent_shell.start()
         self._start_pasta()
@@ -881,6 +807,60 @@ class RootfulSandbox(SandboxBase):
     # ------------------------------------------------------------------ #
     #  Reset helpers                                                       #
     # ------------------------------------------------------------------ #
+
+    def _write_security_files(self, target: Path, *, skip_dev: bool = False) -> None:
+        """Write seccomp, landlock, and read_only marker into *target*/tmp.
+
+        Called during reset() for both userns (target=upper_dir) and
+        rootful (target=rootfs) paths.  When ``fast_reset`` is enabled,
+        writes pre-cached bytes from memory instead of rebuilding.
+
+        Args:
+            target: Root directory to write into (upper_dir or rootfs).
+            skip_dev: Touch ``.adl_skip_dev`` marker (userns mode).
+        """
+        # -- seccomp BPF + helper binary --
+        if self._config.fast_reset and getattr(self, "_cached_bpf", None):
+            tmp_dir = target / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_seccomp.bpf").write_bytes(self._cached_bpf)
+            if skip_dev:
+                (tmp_dir / ".adl_skip_dev").touch()
+            if self._cached_helper_bytes:
+                (tmp_dir / ".adl_seccomp").write_bytes(self._cached_helper_bytes)
+                (tmp_dir / ".adl_seccomp").chmod(0o755)
+        elif self._config.seccomp:
+            from agentdocker_lite.security import build_seccomp_bpf
+            bpf_bytes = build_seccomp_bpf()
+            if bpf_bytes:
+                tmp_dir = target / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                if skip_dev:
+                    (tmp_dir / ".adl_skip_dev").touch()
+                vendor_dir = Path(__file__).parent.parent / "_vendor"
+                helper_src = vendor_dir / "adl-seccomp"
+                if helper_src.exists():
+                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
+
+        # -- Landlock config --
+        if self._config.fast_reset and getattr(self, "_cached_landlock_config", None):
+            tmp_dir = target / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_landlock").write_text(self._cached_landlock_config)
+        else:
+            ll_config = self._build_landlock_config(self._config)
+            if ll_config:
+                tmp_dir = target / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_landlock").write_text(ll_config)
+
+        # -- read_only marker --
+        if self._config.read_only and self._config.seccomp:
+            marker = target / "tmp" / ".adl_readonly"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
 
     def _reset_overlayfs(self):
         if self._overlay_mounted:
