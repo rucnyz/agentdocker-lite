@@ -872,6 +872,145 @@ class TestLandlockRootless:
 
 
 # ------------------------------------------------------------------ #
+#  Rename-based reset tests (rootless)                                 #
+# ------------------------------------------------------------------ #
+
+
+class TestRenamReset:
+    """Verify O(1) rename-based reset in rootless mode."""
+
+    def _skip_if_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+
+    def test_many_files_reset(self, tmp_path, shared_cache_dir):
+        """Reset with 200 files (RL episode scenario)."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-many-files")
+        try:
+            sb.run("mkdir -p /workspace/src && seq 1 200 | "
+                   "xargs -I{} sh -c 'echo x > /workspace/src/gen_{}.py'")
+            sb.reset()
+            _, ec = sb.run("ls /workspace/src/ 2>/dev/null")
+            assert ec != 0, "directory survived reset"
+            out, ec = sb.run("echo ok")
+            assert ec == 0 and "ok" in out
+        finally:
+            sb.delete()
+
+    def test_dead_dirs_cleaned_on_next_reset(self, tmp_path, shared_cache_dir):
+        """Dead dirs from previous reset are cleaned at the start of next reset."""
+        self._skip_if_root()
+        _requires_docker()
+        env_base = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_base,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-dead-cleanup")
+        try:
+            env_dir = Path(env_base) / "userns-dead-cleanup"
+
+            # First reset creates dead dirs
+            sb.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
+            sb.reset()
+            dead_after_first = list(env_dir.glob("*.dead.*"))
+            assert len(dead_after_first) > 0, "rename should create dead dirs"
+
+            # Second reset should clean previous dead dirs
+            sb.run("echo x > /workspace/test.txt")
+            sb.reset()
+            dead_after_second = list(env_dir.glob("*.dead.*"))
+            # Should have new dead dirs but old ones should be gone
+            # At most 1 round of dead dirs (from the second reset)
+            assert len(dead_after_second) <= 2, (
+                f"Expected at most 2 dead dirs (upper+work), got {len(dead_after_second)}"
+            )
+        finally:
+            sb.delete()
+
+    def test_no_dead_dirs_accumulate(self, tmp_path, shared_cache_dir):
+        """Repeated resets should not accumulate dead dirs."""
+        self._skip_if_root()
+        _requires_docker()
+        env_base = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_base,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-no-accumulate")
+        try:
+            env_dir = Path(env_base) / "userns-no-accumulate"
+
+            for i in range(10):
+                sb.run(f"seq 1 50 | xargs -I{{}} touch /workspace/f_{{}}")
+                sb.reset()
+
+            dead_dirs = list(env_dir.glob("*.dead.*"))
+            # Should have at most 2 (upper.dead + work.dead from last reset)
+            assert len(dead_dirs) <= 2, (
+                f"Dead dirs accumulated: {len(dead_dirs)} "
+                f"(expected <= 2 after 10 resets)"
+            )
+        finally:
+            sb.delete()
+
+    def test_delete_cleans_all_dead_dirs(self, tmp_path, shared_cache_dir):
+        """delete() removes env_dir including any remaining dead dirs."""
+        self._skip_if_root()
+        _requires_docker()
+        env_base = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_base,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-delete-dead")
+        env_dir = Path(env_base) / "userns-delete-dead"
+
+        for _ in range(5):
+            sb.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
+            sb.reset()
+
+        sb.delete()
+        assert not env_dir.exists(), "env_dir should be fully removed"
+
+    def test_dev_devices_survive_rename_reset(self, tmp_path, shared_cache_dir):
+        """/dev devices should work after rename-based reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-dev-rename")
+        try:
+            sb.run("seq 1 100 | xargs -I{} touch /workspace/f_{}")
+            sb.reset()
+            for dev in ("null", "zero", "random", "urandom"):
+                output, ec = sb.run(f"test -c /dev/{dev} && echo ok")
+                assert ec == 0 and "ok" in output, (
+                    f"/dev/{dev} not a char device after rename reset"
+                )
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
 #  Config combination tests (rootless)                                 #
 # ------------------------------------------------------------------ #
 
@@ -958,6 +1097,36 @@ class TestConfigCombinations:
             # cow writes don't affect host
             sb.run("echo modified > /data/original.txt")
             assert (shared / "original.txt").read_text().strip() == "original"
+        finally:
+            sb.delete()
+
+    def test_cow_volume_reset_reverts(self, tmp_path, shared_cache_dir):
+        """cow volume changes should be reverted on reset."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "data.txt").write_text("original")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            volumes=[f"{shared}:/data:cow"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-cow-reset")
+        try:
+            sb.run("echo modified > /data/data.txt")
+            out, _ = sb.run("cat /data/data.txt")
+            assert "modified" in out
+
+            sb.reset()
+
+            out, _ = sb.run("cat /data/data.txt")
+            assert out.strip() == "original", (
+                f"cow volume should revert on reset, got: {out.strip()!r}"
+            )
         finally:
             sb.delete()
 

@@ -248,7 +248,8 @@ class RootfulSandbox(SandboxBase):
         if self._userns:
             # Mount namespace died with shell -- mounts auto-cleaned.
             # O(1) rename: move old dirs aside, create fresh empty ones.
-            # Dead dirs stay in env_dir and are cleaned up by delete().
+            # Clean previous dead dirs first to bound disk usage.
+            self._cleanup_dead_dirs()
             for d in (self._upper_dir, self._work_dir):
                 if d and d.exists():
                     dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
@@ -264,6 +265,18 @@ class RootfulSandbox(SandboxBase):
                         shutil.rmtree(d, ignore_errors=True)
                 if d:
                     d.mkdir(parents=True, exist_ok=True)
+
+            # Clear cow volume upper dirs so cow changes are reverted on reset
+            for spec in self._config.volumes:
+                if isinstance(spec, str) and spec.endswith(":cow"):
+                    parts = spec.split(":")
+                    container_path = parts[1] if len(parts) > 2 else "/"
+                    safe = container_path.replace("/", "_").strip("_")
+                    for suffix in ("upper", "work"):
+                        cow_dir = self._env_dir / f"cow_{safe}_{suffix}"
+                        if cow_dir.exists():
+                            shutil.rmtree(cow_dir, ignore_errors=True)
+                        cow_dir.mkdir(parents=True, exist_ok=True)
 
             # Re-create working dir in upper
             if self._config.working_dir and self._config.working_dir != "/":
@@ -779,7 +792,8 @@ class RootfulSandbox(SandboxBase):
             self._overlay_mounted = False
 
         # O(1) rename: move old dirs aside, create fresh empty ones.
-        # Dead dirs stay in env_dir and are cleaned up by delete().
+        # Clean previous dead dirs first to bound disk usage.
+        self._cleanup_dead_dirs()
         for d in (self._upper_dir, self._work_dir):
             if d and d.exists():
                 dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
@@ -792,6 +806,22 @@ class RootfulSandbox(SandboxBase):
                 d.mkdir(parents=True, exist_ok=True)
 
         self._setup_overlay()
+
+    def _cleanup_dead_dirs(self) -> None:
+        """Remove ``*.dead.*`` dirs left by previous rename-based resets.
+
+        Called at the start of each reset() to bound disk usage to at
+        most one round of dead dirs.
+        """
+        for dead in self._env_dir.glob("*.dead.*"):
+            if dead.is_dir():
+                # Overlayfs workdir may have 000-perm children in userns.
+                for child in dead.rglob("*"):
+                    try:
+                        child.chmod(0o700)
+                    except OSError:
+                        pass
+                shutil.rmtree(dead, ignore_errors=True)
 
     def _write_security_files(self, target: Path, *, skip_dev: bool = False) -> None:
         """Write seccomp, landlock, and read_only marker into *target*/tmp.
