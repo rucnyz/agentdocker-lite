@@ -15,7 +15,27 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
 ]
+readme = "README.md"
+keywords = [
+    "sandbox",
+    "container",
+    "namespace",
+    "linux",
+    "isolation",
+    "reinforcement-learning",
+    "overlayfs",
+    "rootless",
+    "checkpoint",
+    "criu",
+]
+authors = [{ name = "Yuzhou Nie" }]
 dependencies = ["protobuf>=4.0"]
+
+[project.urls]
+Homepage = "https://github.com/opensage-agent/agentdocker-lite"
+Repository = "https://github.com/opensage-agent/agentdocker-lite"
+"Bug Tracker" = "https://github.com/opensage-agent/agentdocker-lite/issues"
+Changelog = "https://github.com/opensage-agent/agentdocker-lite/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0"]

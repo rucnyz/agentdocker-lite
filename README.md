@@ -1,6 +1,6 @@
 # agentdocker-lite
 
-[![Tests](https://github.com/rucnyz/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/rucnyz/agentdocker-lite/actions/workflows/test.yml)
+[![Tests](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
 [![Python](https://img.shields.io/pypi/pyversions/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

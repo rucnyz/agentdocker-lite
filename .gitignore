@@ -1,4 +1,10 @@
 __pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
 .idea/
 dev/.envrc
 uv.lock
