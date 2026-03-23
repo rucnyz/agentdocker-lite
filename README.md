@@ -15,7 +15,7 @@ Lightweight Linux namespace sandbox with persistent shell and instant filesystem
 - **Persistent shell**: ~12ms per command (vs ~80ms Docker exec)
 - **Instant reset**: overlayfs upper layer clear — ~50ms including shell restart
 - **Fast lifecycle**: ~40ms create, ~9ms delete
-- **CRIU checkpoint/restore**: Full process-state save/restore (memory, registers, fds) for RL partial rollout
+- **Process checkpoint/restore**: Full process-state save/restore (memory, registers, fds) for RL partial rollout
 - **Port mapping**: Vendored `pasta` binary for NAT + TCP port forwarding, zero dependencies
 - **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
@@ -115,7 +115,6 @@ SandboxConfig(
 | Method | Description |
 |--------|-------------|
 | `sb.run(cmd, timeout=None)` | Run command, returns `(output, exit_code)` |
-| `sb.run(cmd, tty=True)` | Run with PTY (for interactive programs) |
 | `sb.reset()` | Reset filesystem to initial state |
 | `sb.delete()` | Full cleanup (unmount, remove cgroup, delete files) |
 | `sb.copy_to(local, container)` | Copy file into sandbox |
@@ -212,8 +211,8 @@ SandboxBase.cleanup_stale()
 | Per command | 79ms | 12ms | **7x** |
 | Reset | 2038ms | 53ms | **39x** |
 | Delete | 915ms | 9ms | **104x** |
-| CRIU save | — | 55ms | — |
-| CRIU restore | — | 47ms | — |
+| Checkpoint save | — | 55ms | — |
+| Checkpoint restore | — | 47ms | — |
 
 ### Sustained workloads
 
@@ -221,12 +220,12 @@ SandboxBase.cleanup_stale()
 |---|---|---|---|
 | Throughput (1000 cmds) | 12 cmd/s | 81 cmd/s | **6.7x** |
 | Reset loop (100 cycles) | 0.6/s | 19.0/s | **34x** |
-| CRIU restore loop (50 cycles) | — | 16.0/s | — |
+| Checkpoint restore loop (50 cycles) | — | 16.0/s | — |
 | 4x concurrent (10 cmds each) | 11 cmd/s | 208 cmd/s | **19x** |
 | 8x concurrent | 13 cmd/s | 363 cmd/s | **27x** |
 | 16x concurrent | 20 cmd/s | 423 cmd/s | **21x** |
 
-Reproduce: `sudo python examples/benchmark.py`
+Reproduce: `python examples/benchmark.py`
 
 ## Docker migration cheatsheet
 
@@ -284,8 +283,8 @@ Host kernel (shared)
 ## Examples
 
 ```bash
-sudo python examples/basic_usage.py     # Full feature demo
-sudo python examples/benchmark.py       # Performance comparison vs Docker
+python examples/basic_usage.py     # Full feature demo
+python examples/benchmark.py       # Performance comparison vs Docker
 ```
 
 See [docs/quick_start.md](docs/quick_start.md) for detailed usage guide.

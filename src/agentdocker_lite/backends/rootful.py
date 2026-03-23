@@ -363,12 +363,14 @@ class RootfulSandbox(SandboxBase):
 
         if self._env_dir.exists():
             # Fix 000-perm dirs left by overlayfs kernel in userns mode
-            if self._userns and self._work_dir and self._work_dir.exists():
-                for child in self._work_dir.iterdir():
-                    try:
-                        child.chmod(0o700)
-                    except OSError:
-                        pass
+            if self._userns:
+                for work in self._env_dir.glob("*work*"):
+                    if work.is_dir():
+                        for child in work.rglob("*"):
+                            try:
+                                child.chmod(0o700)
+                            except OSError:
+                                pass
             shutil.rmtree(self._env_dir, ignore_errors=True)
 
         self._unregister(self)

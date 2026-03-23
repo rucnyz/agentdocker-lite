@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -861,3 +862,176 @@ class TestLandlockRootless:
             assert ec != 0, "Landlock should survive reset"
         finally:
             sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Config combination tests (rootless)                                 #
+# ------------------------------------------------------------------ #
+
+
+class TestConfigCombinations:
+    """Verify config option combinations that previously caused bugs."""
+
+    def _skip_if_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+
+    def test_read_only_with_ro_volume(self, tmp_path, shared_cache_dir):
+        """read_only=True + volumes should work (mount points created before ro remount)."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "data.txt").write_text("vol_data")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            read_only=True,
+            volumes=[f"{shared}:/data:ro"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-ro-vol")
+        try:
+            output, ec = sb.run("cat /data/data.txt")
+            assert ec == 0
+            assert "vol_data" in output
+            # rootfs should be read-only
+            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+    def test_read_only_with_rw_volume(self, tmp_path, shared_cache_dir):
+        """read_only rootfs + rw volume: rootfs read-only but volume writable."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            read_only=True,
+            volumes=[f"{shared}:/data:rw"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-ro-rw-vol")
+        try:
+            sb.run("echo written > /data/out.txt")
+            assert (shared / "out.txt").read_text().strip() == "written"
+            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+    def test_read_only_with_cow_volume(self, tmp_path, shared_cache_dir):
+        """read_only rootfs + cow volume: copy-on-write volume works."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "original.txt").write_text("original")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            read_only=True,
+            volumes=[f"{shared}:/data:cow"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-ro-cow-vol")
+        try:
+            output, ec = sb.run("cat /data/original.txt")
+            assert ec == 0
+            assert "original" in output
+            # cow writes don't affect host
+            sb.run("echo modified > /data/original.txt")
+            assert (shared / "original.txt").read_text().strip() == "original"
+        finally:
+            sb.delete()
+
+    def test_full_config_combo(self, tmp_path, shared_cache_dir):
+        """All config options together: read_only + volumes + hostname + dns + net_isolate."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "test.txt").write_text("combo_data")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            read_only=True,
+            volumes=[f"{shared}:/data:ro"],
+            hostname="combo-host",
+            dns=["8.8.8.8"],
+            net_isolate=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-full-combo")
+        try:
+            output, ec = sb.run("cat /data/test.txt")
+            assert ec == 0
+            assert "combo_data" in output
+
+            output, ec = sb.run("hostname")
+            assert ec == 0
+            assert "combo-host" in output
+
+            output, ec = sb.run("cat /etc/resolv.conf")
+            assert ec == 0
+            assert "8.8.8.8" in output
+        finally:
+            sb.delete()
+
+    def test_hostname_no_stderr_leak(self, tmp_path, shared_cache_dir):
+        """Hostname setup errors should not leak into first command output."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            hostname="clean-host",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-hostname-clean")
+        try:
+            output, ec = sb.run("echo clean_output")
+            assert ec == 0
+            assert output.strip() == "clean_output", (
+                f"First command output should be clean, got: {output!r}"
+            )
+        finally:
+            sb.delete()
+
+    def test_cow_volume_no_artifacts_after_delete(self, tmp_path, shared_cache_dir):
+        """cow volume sandbox should leave no artifacts after delete."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "data.txt").write_text("cow_test")
+
+        env_base = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            volumes=[f"{shared}:/data:cow"],
+            env_base_dir=env_base,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-cow-cleanup")
+        sb.run("echo x > /data/new_file.txt")
+        sb.delete()
+
+        env_dir = Path(env_base) / "userns-cow-cleanup"
+        assert not env_dir.exists(), (
+            f"Sandbox env dir should be fully removed, but found: "
+            f"{list(env_dir.rglob('*')) if env_dir.exists() else []}"
+        )

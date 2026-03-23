@@ -285,6 +285,15 @@ class RootlessSandbox(RootfulSandbox):
             f"-o lowerdir={self._lowerdir_spec},upperdir={upper},workdir={work},userxattr {merged}",
         ]
 
+        # Pre-create volume mount points BEFORE read-only remount.
+        for spec in self._config.volumes:
+            if not isinstance(spec, str) or ":" not in spec:
+                continue
+            parts = spec.split(":")
+            container_path = parts[1] if len(parts) > 1 else "/"
+            target = f"{merged}/{container_path.lstrip('/')}"
+            lines.append(f"mkdir -p {target}")
+
         # Read-only rootfs: bind + remount ro BEFORE other mounts.
         # Mounts added afterwards (/proc, /dev, volumes) are on top and stay rw.
         if self._config.read_only:
@@ -329,7 +338,7 @@ class RootlessSandbox(RootfulSandbox):
             "",
         ])
 
-        # Volume mounts
+        # Volume mounts (mount points already created above, before ro remount)
         for spec in self._config.volumes:
             if not isinstance(spec, str) or ":" not in spec:
                 continue
@@ -338,7 +347,6 @@ class RootlessSandbox(RootfulSandbox):
             container_path = parts[1] if len(parts) > 1 else "/"
             mode = parts[2] if len(parts) > 2 else "rw"
             target = f"{merged}/{container_path.lstrip('/')}"
-            lines.append(f"mkdir -p {target}")
             if mode == "cow":
                 safe = container_path.replace("/", "_").strip("_")
                 cow_upper = self._env_dir / f"cow_{safe}_upper"
@@ -368,7 +376,7 @@ class RootlessSandbox(RootfulSandbox):
             lines.extend([
                 "",
                 "# Hostname (must be set before adl-seccomp makes /proc/sys read-only)",
-                f"echo {hn} > /proc/sys/kernel/hostname 2>/dev/null || hostname {hn} 2>/dev/null",
+                f"{{ echo {hn} > /proc/sys/kernel/hostname; }} 2>/dev/null || hostname {hn} 2>/dev/null || true",
             ])
 
         port_map = self._config.port_map

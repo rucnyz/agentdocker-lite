@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Basic usage example for agentdocker-lite.
 
-Must be run as root (requires mount/cgroup operations).
-Requires Docker to auto-prepare rootfs from image names.
+No root required. CRIU checkpoint and port mapping demos are
+automatically skipped when not running as root.
 """
 
 import os
