@@ -247,54 +247,30 @@ class RootfulSandbox(SandboxBase):
 
         if self._userns:
             # Mount namespace died with shell -- mounts auto-cleaned.
-            # Clear upper/work on host filesystem.
-            # The kernel's overlayfs creates work/work with 000 perms;
-            # fix permissions before rmtree.
+            # O(1) rename: move old dirs aside, create fresh empty ones.
+            # Dead dirs stay in env_dir and are cleaned up by delete().
             for d in (self._upper_dir, self._work_dir):
                 if d and d.exists():
-                    # Overlayfs kernel creates work/work with 000 perms.
-                    # Fix permissions so rmtree can delete.
-                    for child in d.iterdir():
-                        try:
-                            child.chmod(0o700)
-                        except OSError:
-                            pass
-                    shutil.rmtree(d)
+                    dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
+                    try:
+                        d.rename(dead)
+                    except OSError:
+                        # Fallback: fix 000-perm dirs then synchronous delete
+                        for child in d.iterdir():
+                            try:
+                                child.chmod(0o700)
+                            except OSError:
+                                pass
+                        shutil.rmtree(d, ignore_errors=True)
                 if d:
-                    d.mkdir(parents=True)
+                    d.mkdir(parents=True, exist_ok=True)
 
             # Re-create working dir in upper
             if self._config.working_dir and self._config.working_dir != "/":
                 wd = self._upper_dir / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
-            # Re-write seccomp helper to upper
-            if self._config.seccomp:
-                from agentdocker_lite.security import build_seccomp_bpf
-                bpf_bytes = build_seccomp_bpf()
-                if bpf_bytes:
-                    tmp_dir = self._upper_dir / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                    (tmp_dir / ".adl_skip_dev").touch()
-                    vendor_dir = Path(__file__).parent.parent / "_vendor"
-                    helper_src = vendor_dir / "adl-seccomp"
-                    if helper_src.exists():
-                        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                        (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-            # Re-write Landlock config to upper
-            ll_config = self._build_landlock_config(self._config)
-            if ll_config:
-                tmp_dir = self._upper_dir / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(ll_config)
-
-            # Re-create read_only marker (cleared by upper dir wipe)
-            if self._config.read_only and self._config.seccomp:
-                marker = self._upper_dir / "tmp" / ".adl_readonly"
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch()
+            self._write_security_files(self._upper_dir, skip_dev=True)
         else:
             self._unmount_binds()
             if self._fs_backend == "btrfs":
@@ -306,30 +282,7 @@ class RootfulSandbox(SandboxBase):
                 wd = self._rootfs / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
-            # Re-write seccomp + read_only marker after overlayfs reset
-            if self._config.seccomp:
-                from agentdocker_lite.security import build_seccomp_bpf
-                bpf_bytes = build_seccomp_bpf()
-                if bpf_bytes:
-                    vendor_dir = Path(__file__).parent.parent / "_vendor"
-                    helper_src = vendor_dir / "adl-seccomp"
-                    if helper_src.exists():
-                        tmp_dir = self._rootfs / "tmp"
-                        tmp_dir.mkdir(parents=True, exist_ok=True)
-                        (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                        (tmp_dir / ".adl_seccomp").chmod(0o755)
-            if self._config.read_only and self._config.seccomp:
-                marker = self._rootfs / "tmp" / ".adl_readonly"
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch()
-
-            # Re-write Landlock config after overlayfs reset
-            ll_config = self._build_landlock_config(self._config)
-            if ll_config:
-                tmp_dir = self._rootfs / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(ll_config)
+            self._write_security_files(self._rootfs)
 
         self._persistent_shell.start()
         self._start_pasta()
@@ -825,17 +778,52 @@ class RootfulSandbox(SandboxBase):
             subprocess.run(["umount", "-l", str(self._rootfs)], capture_output=True)
             self._overlay_mounted = False
 
-        if self._upper_dir and self._upper_dir.exists():
-            shutil.rmtree(self._upper_dir)
-        if self._upper_dir:
-            self._upper_dir.mkdir(parents=True)
-
-        if self._work_dir and self._work_dir.exists():
-            shutil.rmtree(self._work_dir)
-        if self._work_dir:
-            self._work_dir.mkdir(parents=True)
+        # O(1) rename: move old dirs aside, create fresh empty ones.
+        # Dead dirs stay in env_dir and are cleaned up by delete().
+        for d in (self._upper_dir, self._work_dir):
+            if d and d.exists():
+                dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
+                try:
+                    d.rename(dead)
+                except OSError:
+                    # Fallback: synchronous delete (e.g. cross-device)
+                    shutil.rmtree(d, ignore_errors=True)
+            if d:
+                d.mkdir(parents=True, exist_ok=True)
 
         self._setup_overlay()
+
+    def _write_security_files(self, target: Path, *, skip_dev: bool = False) -> None:
+        """Write seccomp, landlock, and read_only marker into *target*/tmp.
+
+        Called during reset() for both userns (target=upper_dir) and
+        rootful (target=rootfs) paths.
+        """
+        if self._config.seccomp:
+            from agentdocker_lite.security import build_seccomp_bpf
+            bpf_bytes = build_seccomp_bpf()
+            if bpf_bytes:
+                tmp_dir = target / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                if skip_dev:
+                    (tmp_dir / ".adl_skip_dev").touch()
+                vendor_dir = Path(__file__).parent.parent / "_vendor"
+                helper_src = vendor_dir / "adl-seccomp"
+                if helper_src.exists():
+                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
+
+        ll_config = self._build_landlock_config(self._config)
+        if ll_config:
+            tmp_dir = target / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_landlock").write_text(ll_config)
+
+        if self._config.read_only and self._config.seccomp:
+            marker = target / "tmp" / ".adl_readonly"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
 
     def _reset_btrfs(self):
         result = subprocess.run(
