@@ -444,17 +444,22 @@ def bench_ab_comparison() -> None:
     docker_tag = "adl_bench_docker"
     docker_container = "adl_bench_container"
 
+    N_ROUNDS = 5
+
     # ── AgentDockerLite ──
     config = SandboxConfig(image=IMAGE, working_dir="/app")
     t0 = time.monotonic()
     sb = Sandbox(config, name="bench-ab")
     adl_start = (time.monotonic() - t0) * 1000
 
-    adl_exec_times = []
-    for cmd in commands:
-        t = time.monotonic()
-        sb.run(cmd)
-        adl_exec_times.append((time.monotonic() - t) * 1000)
+    # Run each command N_ROUNDS times, take median
+    adl_exec_all: dict[int, list[float]] = {i: [] for i in range(len(commands))}
+    for _ in range(N_ROUNDS):
+        for i, cmd in enumerate(commands):
+            t = time.monotonic()
+            sb.run(cmd)
+            adl_exec_all[i].append((time.monotonic() - t) * 1000)
+    adl_exec_times = [sorted(adl_exec_all[i])[N_ROUNDS // 2] for i in range(len(commands))]
 
     t0 = time.monotonic()
     sb.delete()
@@ -476,14 +481,16 @@ def bench_ab_comparison() -> None:
     )
     docker_start = (time.monotonic() - t0) * 1000
 
-    docker_exec_times = []
-    for cmd in commands:
-        t = time.monotonic()
-        subprocess.run(
-            ["docker", "exec", docker_container, "bash", "-c", cmd],
-            capture_output=True, text=True, timeout=30,
-        )
-        docker_exec_times.append((time.monotonic() - t) * 1000)
+    docker_exec_all: dict[int, list[float]] = {i: [] for i in range(len(commands))}
+    for _ in range(N_ROUNDS):
+        for i, cmd in enumerate(commands):
+            t = time.monotonic()
+            subprocess.run(
+                ["docker", "exec", docker_container, "bash", "-c", cmd],
+                capture_output=True, text=True, timeout=30,
+            )
+            docker_exec_all[i].append((time.monotonic() - t) * 1000)
+    docker_exec_times = [sorted(docker_exec_all[i])[N_ROUNDS // 2] for i in range(len(commands))]
 
     t0 = time.monotonic()
     subprocess.run(["docker", "rm", "-f", docker_container], capture_output=True)
@@ -491,10 +498,10 @@ def bench_ab_comparison() -> None:
     docker_stop = (time.monotonic() - t0) * 1000
 
     # ── Print comparison ──
-    print("\n" + "=" * 70)
-    print("  A/B Benchmark: AgentDockerLite vs Docker")
-    print("  (Docker flow: build + run -d + exec + rm, like Harbor)")
-    print("=" * 70)
+    print(f"\n{'=' * 70}")
+    print(f"  A/B Benchmark: AgentDockerLite vs Docker (median of {N_ROUNDS} rounds)")
+    print(f"  (Docker flow: build + run -d + exec + rm, like Harbor)")
+    print(f"{'=' * 70}")
     print(f"  {'Operation':30s} {'ADL':>10s} {'Docker':>10s} {'Speedup':>10s}")
     print(f"  {'-'*30} {'-'*10} {'-'*10} {'-'*10}")
 
@@ -505,7 +512,7 @@ def bench_ab_comparison() -> None:
     _row("Create / Start", adl_start, docker_start)
     adl_exec_mean = sum(adl_exec_times) / len(adl_exec_times)
     docker_exec_mean = sum(docker_exec_times) / len(docker_exec_times)
-    _row("Exec (mean)", adl_exec_mean, docker_exec_mean)
+    _row("Exec (median avg)", adl_exec_mean, docker_exec_mean)
     _row("Stop / Cleanup", adl_stop, docker_stop)
 
     print()

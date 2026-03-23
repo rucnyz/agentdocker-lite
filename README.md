@@ -7,14 +7,14 @@
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
 
-**20–100x faster lifecycle** than Docker. Designed for high-frequency workloads like RL training where environments are created, reset, and destroyed thousands of times.
+**45–127x faster lifecycle** than Docker. Designed for high-frequency workloads like RL training where environments are created, reset, and destroyed thousands of times.
 
 ## Key features
 
 - **No root required**: Full isolation via user namespaces (overlayfs, PID/UTS/IPC/net namespace, chroot)
-- **Persistent shell**: ~12ms per command (vs ~80ms Docker exec)
-- **Instant reset**: overlayfs upper layer clear — ~50ms including shell restart
-- **Fast lifecycle**: ~40ms create, ~9ms delete
+- **Persistent shell**: ~11ms per command (vs ~17ms Docker exec)
+- **Instant reset**: O(1) overlayfs upper rename — ~7ms including shell restart
+- **Fast lifecycle**: ~7ms create, ~2ms delete
 - **Process checkpoint/restore**: Full process-state save/restore (memory, registers, fds) for RL partial rollout
 - **Port mapping**: Vendored `pasta` binary for NAT + TCP port forwarding, zero dependencies
 - **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
@@ -207,23 +207,23 @@ SandboxBase.cleanup_stale()
 
 | | Docker | agentdocker-lite | Speedup |
 |---|---|---|---|
-| Create | 2448ms | 43ms | **57x** |
-| Per command | 79ms | 12ms | **7x** |
-| Reset | 2038ms | 53ms | **39x** |
-| Delete | 915ms | 9ms | **104x** |
-| Checkpoint save | — | 55ms | — |
-| Checkpoint restore | — | 47ms | — |
+| Create | 320ms | 7ms | **45x** |
+| Per command | 17ms | 11ms | **1.7x** |
+| Reset | 605ms | 7ms | **82x** |
+| Delete | 217ms | 2ms | **127x** |
+| Checkpoint save | — | 12ms | — |
+| Checkpoint restore | — | 13ms | — |
 
 ### Sustained workloads
 
 | | Docker | agentdocker-lite | Speedup |
 |---|---|---|---|
-| Throughput (1000 cmds) | 12 cmd/s | 81 cmd/s | **6.7x** |
-| Reset loop (100 cycles) | 0.6/s | 19.0/s | **34x** |
-| Checkpoint restore loop (50 cycles) | — | 16.0/s | — |
-| 4x concurrent (10 cmds each) | 11 cmd/s | 208 cmd/s | **19x** |
-| 8x concurrent | 13 cmd/s | 363 cmd/s | **27x** |
-| 16x concurrent | 20 cmd/s | 423 cmd/s | **21x** |
+| Throughput (1000 cmds) | 58 cmd/s | 95 cmd/s | **1.6x** |
+| Reset loop (100 cycles) | 2.0/s | 57.1/s | **29x** |
+| Checkpoint restore loop (50 cycles) | — | 39.6/s | — |
+| 4x concurrent (10 cmds each) | 28 cmd/s | 331 cmd/s | **12x** |
+| 8x concurrent | 31 cmd/s | 622 cmd/s | **20x** |
+| 16x concurrent | 32 cmd/s | 1009 cmd/s | **32x** |
 
 Reproduce: `python examples/benchmark.py`
 
