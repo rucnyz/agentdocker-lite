@@ -109,6 +109,7 @@ class SandboxConfig:
     allowed_ports: Optional[list[int]] = None
     oom_score_adj: Optional[int] = None
     cpuset_cpus: Optional[str] = None
+    fast_reset: bool = False
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:

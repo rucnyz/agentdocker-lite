@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -234,6 +235,18 @@ class RootlessSandbox(RootfulSandbox):
         # Write PID file for stale sandbox cleanup
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(os.getpid()))
+
+        # Cache seccomp BPF + landlock config for fast_reset mode
+        if config.seccomp:
+            from agentdocker_lite.security import build_seccomp_bpf
+            self._cached_bpf = build_seccomp_bpf()
+            vendor_dir = Path(__file__).parent.parent / "_vendor"
+            helper_src = vendor_dir / "adl-seccomp"
+            self._cached_helper_bytes = helper_src.read_bytes() if helper_src.exists() else None
+        else:
+            self._cached_bpf = None
+            self._cached_helper_bytes = None
+        self._cached_landlock_config = self._build_landlock_config(config)
 
         self.features: dict[str, object] = {
             "userns": True,

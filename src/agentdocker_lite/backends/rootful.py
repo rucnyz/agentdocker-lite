@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -200,6 +201,19 @@ class RootfulSandbox(SandboxBase):
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(os.getpid()))
 
+        # Cache seccomp BPF + landlock config for fast_reset mode
+        # (avoids rebuild + shutil.copy2 on every reset call).
+        if config.seccomp:
+            from agentdocker_lite.security import build_seccomp_bpf
+            self._cached_bpf = build_seccomp_bpf()
+            vendor_dir = Path(__file__).parent.parent / "_vendor"
+            helper_src = vendor_dir / "adl-seccomp"
+            self._cached_helper_bytes = helper_src.read_bytes() if helper_src.exists() else None
+        else:
+            self._cached_bpf = None
+            self._cached_helper_bytes = None
+        self._cached_landlock_config = self._build_landlock_config(config)
+
         self.features: dict[str, object] = {
             "pidfd": self._persistent_shell._pidfd is not None,
             "cgroup_v2": self._cgroup_path is not None,
@@ -248,20 +262,43 @@ class RootfulSandbox(SandboxBase):
         if self._userns:
             # Mount namespace died with shell -- mounts auto-cleaned.
             # Clear upper/work on host filesystem.
-            # The kernel's overlayfs creates work/work with 000 perms;
-            # fix permissions before rmtree.
-            for d in (self._upper_dir, self._work_dir):
-                if d and d.exists():
-                    # Overlayfs kernel creates work/work with 000 perms.
-                    # Fix permissions so rmtree can delete.
-                    for child in d.iterdir():
+            if self._config.fast_reset:
+                # Fast path: O(1) rename + background delete.
+                dead_dirs: list[Path] = []
+                for d in (self._upper_dir, self._work_dir):
+                    if d and d.exists():
+                        dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
                         try:
-                            child.chmod(0o700)
+                            d.rename(dead)
+                            dead_dirs.append(dead)
                         except OSError:
-                            pass
-                    shutil.rmtree(d)
-                if d:
-                    d.mkdir(parents=True)
+                            # Fallback: fix perms + synchronous delete
+                            for child in d.iterdir():
+                                try:
+                                    child.chmod(0o700)
+                                except OSError:
+                                    pass
+                            shutil.rmtree(d, ignore_errors=True)
+                    if d:
+                        d.mkdir(parents=True, exist_ok=True)
+                if dead_dirs:
+                    threading.Thread(
+                        target=self._cleanup_dead_dirs_userns,
+                        args=(dead_dirs,),
+                        daemon=True,
+                    ).start()
+            else:
+                # Original path: fix 000-perm dirs then synchronous rmtree.
+                for d in (self._upper_dir, self._work_dir):
+                    if d and d.exists():
+                        for child in d.iterdir():
+                            try:
+                                child.chmod(0o700)
+                            except OSError:
+                                pass
+                        shutil.rmtree(d)
+                    if d:
+                        d.mkdir(parents=True)
 
             # Re-create working dir in upper
             if self._config.working_dir and self._config.working_dir != "/":
@@ -269,13 +306,22 @@ class RootfulSandbox(SandboxBase):
                 wd.mkdir(parents=True, exist_ok=True)
 
             # Re-write seccomp helper to upper
-            if self._config.seccomp:
+            if self._config.fast_reset and getattr(self, "_cached_bpf", None):
+                tmp_dir = self._upper_dir / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_seccomp.bpf").write_bytes(self._cached_bpf)
+                (tmp_dir / ".adl_skip_dev").touch()
+                if self._cached_helper_bytes:
+                    (tmp_dir / ".adl_seccomp").write_bytes(self._cached_helper_bytes)
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
+            elif self._config.seccomp:
                 from agentdocker_lite.security import build_seccomp_bpf
                 bpf_bytes = build_seccomp_bpf()
                 if bpf_bytes:
                     tmp_dir = self._upper_dir / "tmp"
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                    (tmp_dir / ".adl_skip_dev").touch()
                     vendor_dir = Path(__file__).parent.parent / "_vendor"
                     helper_src = vendor_dir / "adl-seccomp"
                     if helper_src.exists():
@@ -283,11 +329,16 @@ class RootfulSandbox(SandboxBase):
                         (tmp_dir / ".adl_seccomp").chmod(0o755)
 
             # Re-write Landlock config to upper
-            ll_config = self._build_landlock_config(self._config)
-            if ll_config:
+            if self._config.fast_reset and getattr(self, "_cached_landlock_config", None):
                 tmp_dir = self._upper_dir / "tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(ll_config)
+                (tmp_dir / ".adl_landlock").write_text(self._cached_landlock_config)
+            else:
+                ll_config = self._build_landlock_config(self._config)
+                if ll_config:
+                    tmp_dir = self._upper_dir / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    (tmp_dir / ".adl_landlock").write_text(ll_config)
 
             # Re-create read_only marker (cleared by upper dir wipe)
             if self._config.read_only and self._config.seccomp:
@@ -306,7 +357,16 @@ class RootfulSandbox(SandboxBase):
                 wd.mkdir(parents=True, exist_ok=True)
 
             # Re-write seccomp + read_only marker after overlayfs reset
-            if self._config.seccomp:
+            if self._config.fast_reset and self._cached_bpf:
+                # Fast path: use cached bytes (skip build_seccomp_bpf + copy2)
+                tmp_dir = self._rootfs / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_seccomp.bpf").write_bytes(self._cached_bpf)
+                if self._cached_helper_bytes:
+                    (tmp_dir / ".adl_seccomp").write_bytes(self._cached_helper_bytes)
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
+            elif self._config.seccomp:
+                # Original path: rebuild from scratch
                 from agentdocker_lite.security import build_seccomp_bpf
                 bpf_bytes = build_seccomp_bpf()
                 if bpf_bytes:
@@ -324,11 +384,16 @@ class RootfulSandbox(SandboxBase):
                 marker.touch()
 
             # Re-write Landlock config after overlayfs reset
-            ll_config = self._build_landlock_config(self._config)
-            if ll_config:
+            if self._config.fast_reset and self._cached_landlock_config:
                 tmp_dir = self._rootfs / "tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(ll_config)
+                (tmp_dir / ".adl_landlock").write_text(self._cached_landlock_config)
+            else:
+                ll_config = self._build_landlock_config(self._config)
+                if ll_config:
+                    tmp_dir = self._rootfs / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    (tmp_dir / ".adl_landlock").write_text(ll_config)
 
         self._persistent_shell.start()
         self._start_pasta()
@@ -822,6 +887,15 @@ class RootfulSandbox(SandboxBase):
             subprocess.run(["umount", "-l", str(self._rootfs)], capture_output=True)
             self._overlay_mounted = False
 
+        if self._config.fast_reset:
+            self._reset_overlayfs_fast()
+        else:
+            self._reset_overlayfs_default()
+
+        self._setup_overlay()
+
+    def _reset_overlayfs_default(self):
+        """Original reset: synchronous rmtree."""
         if self._upper_dir and self._upper_dir.exists():
             shutil.rmtree(self._upper_dir)
         if self._upper_dir:
@@ -832,7 +906,45 @@ class RootfulSandbox(SandboxBase):
         if self._work_dir:
             self._work_dir.mkdir(parents=True)
 
-        self._setup_overlay()
+    def _reset_overlayfs_fast(self):
+        """Fast reset: O(1) rename + background delete."""
+        dead_dirs: list[Path] = []
+        for d in (self._upper_dir, self._work_dir):
+            if d and d.exists():
+                dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
+                try:
+                    d.rename(dead)
+                    dead_dirs.append(dead)
+                except OSError:
+                    # Fallback: synchronous delete (e.g. cross-device rename)
+                    shutil.rmtree(d, ignore_errors=True)
+            if d:
+                d.mkdir(parents=True, exist_ok=True)
+
+        if dead_dirs:
+            threading.Thread(
+                target=self._cleanup_dead_dirs,
+                args=(dead_dirs,),
+                daemon=True,
+            ).start()
+
+    @staticmethod
+    def _cleanup_dead_dirs(dirs: list) -> None:
+        """Background cleanup of renamed overlay dirs."""
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def _cleanup_dead_dirs_userns(dirs: list) -> None:
+        """Background cleanup for userns mode (fix 000-perm dirs first)."""
+        for d in dirs:
+            # Overlayfs kernel creates work/work with 000 perms in userns.
+            for child in Path(d).iterdir():
+                try:
+                    child.chmod(0o700)
+                except OSError:
+                    pass
+            shutil.rmtree(d, ignore_errors=True)
 
     def _reset_btrfs(self):
         result = subprocess.run(
