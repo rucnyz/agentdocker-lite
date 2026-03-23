@@ -219,6 +219,36 @@ class TestReset:
         assert ec == 0
         assert "post-reset" in output
 
+    def test_many_files_reset(self, sandbox):
+        """Reset with many files (RL episode scenario)."""
+        sandbox.run("mkdir -p /workspace/src && seq 1 200 | "
+                    "xargs -I{} sh -c 'echo x > /workspace/src/gen_{}.py'")
+        sandbox.reset()
+        _, ec = sandbox.run("ls /workspace/src/ 2>/dev/null")
+        assert ec != 0, "directory survived reset"
+        out, ec = sandbox.run("echo ok")
+        assert ec == 0 and "ok" in out
+
+    def test_delete_cleans_dead_dirs(self, tmp_path, shared_cache_dir):
+        """delete() removes all dead dirs left by rename-based reset."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="dead-dir-test")
+        env_dir = tmp_path / "envs" / "dead-dir-test"
+
+        for _ in range(5):
+            sb.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
+            sb.reset()
+
+        sb.delete()
+        assert not env_dir.exists(), "env_dir not cleaned up by delete()"
+
 
 # ------------------------------------------------------------------ #
 #  Concurrency                                                         #
