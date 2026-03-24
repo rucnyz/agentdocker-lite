@@ -581,7 +581,7 @@ class TestComposeProject:
         if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
             pytest.skip("requires Docker")
 
-    def test_lifecycle(self, tmp_path):
+    def test_lifecycle(self, tmp_path, shared_cache_dir):
         """up → run → reset → run → down with a single-service compose."""
         self._skip_if_no_sandbox()
 
@@ -597,7 +597,7 @@ class TestComposeProject:
             compose,
             project_name="test-lifecycle",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         try:
             proj.up()
@@ -616,7 +616,7 @@ class TestComposeProject:
         finally:
             proj.down()
 
-    def test_multi_service(self, tmp_path):
+    def test_multi_service(self, tmp_path, shared_cache_dir):
         """Two services with depends_on and /etc/hosts resolution."""
         self._skip_if_no_sandbox()
 
@@ -637,7 +637,7 @@ class TestComposeProject:
             compose,
             project_name="test-multi",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         try:
             proj.up()
@@ -650,7 +650,7 @@ class TestComposeProject:
         finally:
             proj.down()
 
-    def test_same_network_shared_netns(self, tmp_path):
+    def test_same_network_shared_netns(self, tmp_path, shared_cache_dir):
         """Services on same network share a network namespace."""
         self._skip_if_no_sandbox()
 
@@ -671,7 +671,7 @@ class TestComposeProject:
             compose,
             project_name="test-netns",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         try:
             proj.up()
@@ -689,7 +689,7 @@ class TestComposeProject:
         finally:
             proj.down()
 
-    def test_different_networks_isolated(self, tmp_path):
+    def test_different_networks_isolated(self, tmp_path, shared_cache_dir):
         """Services on different networks have different netns."""
         self._skip_if_no_sandbox()
 
@@ -715,7 +715,7 @@ class TestComposeProject:
             compose,
             project_name="test-iso",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         try:
             proj.up()
@@ -727,7 +727,7 @@ class TestComposeProject:
         finally:
             proj.down()
 
-    def test_context_manager(self, tmp_path):
+    def test_context_manager(self, tmp_path, shared_cache_dir):
         """ComposeProject as context manager."""
         self._skip_if_no_sandbox()
 
@@ -743,13 +743,13 @@ class TestComposeProject:
             compose,
             project_name="test-ctx",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         ) as proj:
             output, ec = proj.services["app"].run("echo ctx-ok")
             assert ec == 0
             assert "ctx-ok" in output
 
-    def test_named_volume(self, tmp_path):
+    def test_named_volume(self, tmp_path, shared_cache_dir):
         """Named volumes should persist across service resets."""
         self._skip_if_no_sandbox()
 
@@ -769,7 +769,7 @@ class TestComposeProject:
             compose,
             project_name="test-vol",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
+            rootfs_cache_dir=shared_cache_dir,
         )
         try:
             proj.up()
