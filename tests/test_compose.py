@@ -405,6 +405,39 @@ class TestParseCompose:
 
 
 class TestTopoSort:
+    def test_circular_deps_no_hang(self, tmp_path):
+        """Circular depends_on should not cause infinite loop."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              a:
+                image: a
+                depends_on: [c]
+              b:
+                image: b
+                depends_on: [a]
+              c:
+                image: c
+                depends_on: [b]
+        """))
+        services, _ = _parse_compose(compose, {})
+        # Should complete without hanging; order may vary but all included
+        order = _topo_sort(services)
+        assert set(order) == {"a", "b", "c"}
+
+    def test_missing_dependency(self, tmp_path):
+        """depends_on referencing a non-existent service should not crash."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: app
+                depends_on: [missing_service]
+        """))
+        services, _ = _parse_compose(compose, {})
+        order = _topo_sort(services)
+        assert "app" in order
+
     def test_linear_deps(self, tmp_path):
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""\
@@ -799,6 +832,53 @@ class TestComposeProject:
             assert "persistent" in output
         finally:
             proj.down()
+
+    def test_double_up_raises(self, tmp_path, shared_cache_dir):
+        """Calling up() twice should raise RuntimeError."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-double-up",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            with pytest.raises(RuntimeError, match="already running"):
+                proj.up()
+        finally:
+            proj.down()
+
+    def test_compose_file_not_found(self, tmp_path):
+        """Non-existent compose file should raise FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            ComposeProject(tmp_path / "nonexistent.yml")
+
+    def test_no_services(self, tmp_path, shared_cache_dir):
+        """Compose file with no services should not crash."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text("volumes:\n  data:\n")
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-empty",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        proj.up()  # should be a no-op
+        assert proj.services == {}
+        proj.down()
 
     def test_network_mode_host(self, tmp_path, shared_cache_dir):
         """network_mode: host should use host network, not SharedNetwork."""
