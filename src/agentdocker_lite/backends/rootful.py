@@ -864,7 +864,7 @@ class RootfulSandbox(SandboxBase):
                 timeout=60,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-            logger.debug("_fixup_userns_ownership failed: %s", e)
+            logger.warning("_fixup_userns_ownership failed (mapped-uid files may remain): %s", e)
 
     def _cleanup_dead_dirs(self) -> None:
         """Remove ``*.dead.*`` dirs left by previous rename-based resets.
