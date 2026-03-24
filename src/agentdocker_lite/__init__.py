@@ -7,9 +7,10 @@ from agentdocker_lite.sandbox import Sandbox
 from agentdocker_lite.vm import QemuVM
 
 try:
-    from agentdocker_lite.compose import ComposeProject
+    from agentdocker_lite.compose import ComposeProject, SharedNetwork
 except ImportError:
     ComposeProject = None  # type: ignore[assignment,misc]
+    SharedNetwork = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "Sandbox",
@@ -17,6 +18,7 @@ __all__ = [
     "SandboxBase",
     "CheckpointManager",
     "ComposeProject",
+    "SharedNetwork",
     "QemuVM",
     "get_image_config",
 ]

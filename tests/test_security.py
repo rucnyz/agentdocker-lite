@@ -484,6 +484,123 @@ class TestUserNamespace:
 
 
 # ------------------------------------------------------------------ #
+#  Shared network namespace tests (rootless)                           #
+# ------------------------------------------------------------------ #
+
+
+class TestSharedNetwork:
+    """Verify SharedNetwork for sandbox-level network sharing."""
+
+    def _skip_if_not_rootless(self):
+        if os.geteuid() == 0:
+            pytest.skip("must run as non-root")
+        _requires_docker()
+
+    def test_shared_netns_between_sandboxes(self, tmp_path, shared_cache_dir):
+        """Two sandboxes sharing a SharedNetwork have the same netns."""
+        self._skip_if_not_rootless()
+        from agentdocker_lite.compose import SharedNetwork
+
+        net = SharedNetwork("test-net")
+        try:
+            sb1 = Sandbox(SandboxConfig(
+                image=TEST_IMAGE,
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+                shared_userns=net.userns_path,
+                net_ns=net.netns_path,
+            ), name="net-a")
+            sb2 = Sandbox(SandboxConfig(
+                image=TEST_IMAGE,
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+                shared_userns=net.userns_path,
+                net_ns=net.netns_path,
+            ), name="net-b")
+
+            # Same network namespace
+            ns1, _ = sb1.run("readlink /proc/1/ns/net")
+            ns2, _ = sb2.run("readlink /proc/1/ns/net")
+            assert ns1.strip() == ns2.strip()
+
+            # Different mount namespaces (filesystem isolation)
+            mnt1, _ = sb1.run("readlink /proc/1/ns/mnt")
+            mnt2, _ = sb2.run("readlink /proc/1/ns/mnt")
+            assert mnt1.strip() != mnt2.strip()
+
+            sb2.delete()
+            sb1.delete()
+        finally:
+            net.destroy()
+
+    def test_different_shared_networks_isolated(self, tmp_path, shared_cache_dir):
+        """Sandboxes on different SharedNetworks have different netns."""
+        self._skip_if_not_rootless()
+        from agentdocker_lite.compose import SharedNetwork
+
+        net_a = SharedNetwork("net-a")
+        net_b = SharedNetwork("net-b")
+        try:
+            sb1 = Sandbox(SandboxConfig(
+                image=TEST_IMAGE,
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+                shared_userns=net_a.userns_path,
+                net_ns=net_a.netns_path,
+            ), name="iso-a")
+            sb2 = Sandbox(SandboxConfig(
+                image=TEST_IMAGE,
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+                shared_userns=net_b.userns_path,
+                net_ns=net_b.netns_path,
+            ), name="iso-b")
+
+            ns1, _ = sb1.run("readlink /proc/1/ns/net")
+            ns2, _ = sb2.run("readlink /proc/1/ns/net")
+            assert ns1.strip() != ns2.strip()
+
+            sb2.delete()
+            sb1.delete()
+        finally:
+            net_b.destroy()
+            net_a.destroy()
+
+    def test_shared_network_sandbox_runs_commands(self, tmp_path, shared_cache_dir):
+        """Sandbox with shared userns can run commands normally."""
+        self._skip_if_not_rootless()
+        from agentdocker_lite.compose import SharedNetwork
+
+        net = SharedNetwork("cmd-test")
+        try:
+            sb = Sandbox(SandboxConfig(
+                image=TEST_IMAGE,
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+                shared_userns=net.userns_path,
+                net_ns=net.netns_path,
+            ), name="cmd-test")
+
+            out, ec = sb.run("echo shared-net-ok")
+            assert ec == 0
+            assert "shared-net-ok" in out
+
+            # File I/O works
+            sb.write_file("/tmp/test.txt", "hello\n")
+            content = sb.read_file("/tmp/test.txt")
+            assert "hello" in content
+
+            # Reset works
+            sb.reset()
+            _, ec = sb.run("cat /tmp/test.txt 2>/dev/null")
+            assert ec != 0
+
+            sb.delete()
+        finally:
+            net.destroy()
+
+
+# ------------------------------------------------------------------ #
 #  Mapped-uid cleanup tests (rootless full uid mapping)                #
 # ------------------------------------------------------------------ #
 

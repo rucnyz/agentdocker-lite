@@ -130,6 +130,37 @@ for sb in idle_sandboxes:
 
 Requires swap (zram or disk). Returns `False` if kernel doesn't support `process_madvise`.
 
+## Shared network namespace
+
+Multiple sandboxes can share a network namespace for direct communication while keeping filesystem isolation. Uses a Podman-style sentinel process with shared userns+netns.
+
+```python
+from agentdocker_lite import Sandbox, SandboxConfig, SharedNetwork
+
+# Create a shared network
+net = SharedNetwork("my-net")
+
+# Sandboxes join the same network — can communicate via localhost
+sb1 = Sandbox(SandboxConfig(
+    image="ubuntu:22.04",
+    shared_userns=net.userns_path,
+    net_ns=net.netns_path,
+), name="service-a")
+
+sb2 = Sandbox(SandboxConfig(
+    image="ubuntu:22.04",
+    shared_userns=net.userns_path,
+    net_ns=net.netns_path,
+), name="service-b")
+
+# Same netns — service-a can reach service-b via localhost
+# Different mount ns — filesystem is fully isolated
+
+sb1.delete()
+sb2.delete()
+net.destroy()
+```
+
 ## Port mapping (pasta networking)
 
 ```python
