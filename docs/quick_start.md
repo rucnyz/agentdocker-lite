@@ -509,8 +509,6 @@ with ComposeProject("docker-compose.yml") as proj:
     # all services auto-cleaned on exit
 ```
 
-Requires `pyyaml`: `pip install agentdocker-lite[compose]`
-
 ### Compose field support
 
 Unsupported fields raise `ValueError` at parse time — no silent ignoring.

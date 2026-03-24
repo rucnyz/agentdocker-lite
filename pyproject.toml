@@ -29,7 +29,7 @@ keywords = [
     "criu",
 ]
 authors = [{ name = "Yuzhou Nie" }]
-dependencies = ["protobuf>=4.0"]
+dependencies = ["protobuf>=4.0", "pyyaml>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/opensage-agent/agentdocker-lite"
@@ -41,8 +41,7 @@ Changelog = "https://github.com/opensage-agent/agentdocker-lite/blob/main/CHANGE
 adl = "agentdocker_lite.cli:main"
 
 [project.optional-dependencies]
-compose = ["pyyaml>=6.0"]
-dev = ["pytest>=9.0", "pyyaml>=6.0"]
+dev = ["pytest>=9.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentdocker_lite"]

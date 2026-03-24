@@ -26,10 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    import yaml
-except ImportError:
-    yaml = None  # type: ignore[assignment]
+import yaml
 
 from agentdocker_lite.backends.base import SandboxConfig
 from agentdocker_lite.sandbox import Sandbox
@@ -440,11 +437,6 @@ class ComposeProject:
         env_base_dir: Optional[str] = None,
         rootfs_cache_dir: Optional[str] = None,
     ) -> None:
-        if yaml is None:
-            raise ImportError(
-                "pyyaml is required for ComposeProject. "
-                "Install with: pip install agentdocker-lite[compose]"
-            )
         self._compose_file = Path(compose_file).resolve()
         if not self._compose_file.exists():
             raise FileNotFoundError(f"Compose file not found: {self._compose_file}")
