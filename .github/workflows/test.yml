@@ -35,6 +35,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
       - run: python -m pytest tests/test_security.py -v -k "UserNamespace"
       - run: python -m pytest tests/test_compose.py -v
+      - run: python -m pytest tests/test_cli.py -v
 
   root:
     name: Root (${{ matrix.os }}, py${{ matrix.python-version }})

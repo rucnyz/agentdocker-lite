@@ -20,6 +20,8 @@ Lightweight Linux namespace sandbox with persistent shell and instant filesystem
 - **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
 - **Docker layer caching**: Shared base layers across images, skip pull when cached
+- **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces
+- **CLI**: `adl ps/kill/cleanup` for sandbox management
 
 ## Requirements
 
@@ -227,6 +229,29 @@ SandboxBase.cleanup_stale()
 
 Reproduce: `python examples/benchmark.py`
 
+## Docker Compose compatibility
+
+```python
+from agentdocker_lite import ComposeProject
+
+with ComposeProject("docker-compose.yml") as proj:
+    proj.services["api"].run("curl localhost:8080/health")
+    proj.reset()   # filesystem-level reset for all services
+```
+
+Each service runs as an independent sandbox. Services on the same `networks` share a network namespace (can communicate via localhost), different networks are isolated. See [quick_start.md](docs/quick_start.md) for supported compose fields.
+
+## CLI
+
+```bash
+adl ps                  # list running sandboxes
+adl kill <name>         # kill and clean up a sandbox
+adl kill --all          # kill all sandboxes
+adl cleanup             # remove stale sandbox directories
+```
+
+Install: `pip install agentdocker-lite` provides the `adl` command.
+
 ## Docker migration cheatsheet
 
 | Docker | agentdocker-lite |
@@ -254,6 +279,10 @@ Reproduce: `python examples/benchmark.py`
 | `--gpus all` | `devices=["/dev/nvidia0", ...]` |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
+| `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
+| `docker compose down` | `proj.down()` |
+| `docker ps` | `adl ps` |
+| `docker kill <id>` | `adl kill <name>` |
 
 ## Architecture
 
