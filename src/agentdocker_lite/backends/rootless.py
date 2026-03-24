@@ -347,8 +347,9 @@ class RootlessSandbox(RootfulSandbox):
             f"ln -sf pts/ptmx {merged}/dev/ptmx 2>/dev/null || true",
         ])
 
-        # /dev/shm as tmpfs (Docker defaults to 64MB)
-        shm_size = self._config.shm_size or str(64 * 1024 * 1024)
+        # /dev/shm as tmpfs (256MB default — generous enough for QEMU/PyTorch,
+        # tmpfs is demand-paged so unused space costs nothing)
+        shm_size = self._config.shm_size or str(256 * 1024 * 1024)
         lines.append(
             f"mount -t tmpfs -o nosuid,nodev,noexec,size={shm_size} "
             f"tmpfs {merged}/dev/shm"

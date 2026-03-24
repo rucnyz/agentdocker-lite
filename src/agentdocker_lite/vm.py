@@ -112,14 +112,6 @@ class QemuVM:
             TimeoutError: QMP socket not ready within *timeout*.
             FileNotFoundError: ``qemu-system-x86_64`` not found.
         """
-        # Warn if /dev/shm might be too small for VM memory backing
-        shm_cfg = getattr(self._sb, '_config', None)
-        if shm_cfg and not shm_cfg.shm_size:
-            logger.warning(
-                "shm_size not set — /dev/shm defaults to 64MB which may be "
-                "too small for QEMU memory=%s. Set shm_size in SandboxConfig.",
-                self._memory,
-            )
         self._install_qmp_helper()
         cmd = self._build_cmd()
         self._handle = self._sb.run_background(cmd)

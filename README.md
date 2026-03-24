@@ -150,7 +150,7 @@ SandboxConfig(
     io_max="/dev/sda 10mb",         # 10MB/s write limit (also: "rbps=5mb wbps=10mb")
     cpuset_cpus="0-3",              # Pin to CPU 0-3
     oom_score_adj=500,              # Prefer killing sandbox over host
-    shm_size="256m",                # /dev/shm size (default 64m)
+    shm_size="256m",                # /dev/shm size (default 256m)
     tmpfs=["/run:size=100m"],       # additional tmpfs mounts
 
     # Networking

@@ -99,7 +99,7 @@ config = SandboxConfig(
     cpu_shares=1024,           # relative CPU weight (Docker --cpu-shares)
     cpuset_cpus="0-3",         # pin to CPU 0-3
     oom_score_adj=500,         # prefer killing sandbox over host processes
-    shm_size="256m",           # /dev/shm size (default 64m, matches Docker)
+    shm_size="256m",           # /dev/shm size (default 256m)
     tmpfs=["/run:size=100m"],  # additional tmpfs mounts
 )
 ```

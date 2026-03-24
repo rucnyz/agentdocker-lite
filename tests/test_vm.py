@@ -52,7 +52,6 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
         image=TEST_IMAGE,
         devices=["/dev/kvm"],
         volumes=[f"{vm_dir}:/vm:rw"],
-        shm_size="256m",  # QEMU needs /dev/shm for memory backing
         env_base_dir=str(tmp / "envs"),
         rootfs_cache_dir=shared_cache_dir,
     )

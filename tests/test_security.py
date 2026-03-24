@@ -1246,7 +1246,7 @@ class TestShmSize:
             pytest.skip("rootless only")
 
     def test_shm_default_size(self, shared_cache_dir, tmp_path):
-        """Default shm is 64MB."""
+        """Default shm is 256MB tmpfs."""
         self._skip_if_root()
         sb = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
