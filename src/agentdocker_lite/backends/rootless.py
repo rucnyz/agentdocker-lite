@@ -155,11 +155,10 @@ class RootlessSandbox(RootfulSandbox):
                     "cgroup resource limits requested but systemd-run not found. "
                     "Run as root for direct cgroup access."
                 )
-        if config.devices:
-            logger.warning(
-                "Device passthrough is not available in user namespace mode. "
-                "Run as root to enable device passthrough."
-            )
+        # Device passthrough is handled in the setup script via bind mounts.
+        # In user namespaces, bind-mounting from host devtmpfs preserves the
+        # original superblock (no SB_I_NODEV), so device nodes work if the
+        # user has the required group membership (e.g., kvm group for /dev/kvm).
 
         # --- seccomp helper in upper dir ----------------------------------
         if config.seccomp:
@@ -184,6 +183,12 @@ class RootlessSandbox(RootfulSandbox):
             tmp_dir = self._upper_dir / "tmp"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             (tmp_dir / ".adl_landlock").write_text(ll_config)
+
+        # --- Hostname config (adl-seccomp calls sethostname before cap drop) ---
+        if config.hostname:
+            tmp_dir = self._upper_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_hostname").write_text(config.hostname + "\n")
 
         # --- DNS ----------------------------------------------------------
         if config.dns:
@@ -243,6 +248,7 @@ class RootlessSandbox(RootfulSandbox):
             "seccomp": config.seccomp,
             "landlock": ll_config is not None,
             "netns": config.net_isolate,
+            "devices": bool(config.devices),
             "mask_paths": True,
             "cap_drop": True,
         }
@@ -327,6 +333,25 @@ class RootlessSandbox(RootfulSandbox):
             f"mkdir -p {merged}/dev/pts {merged}/dev/shm 2>/dev/null || true",
             f"mount -t devpts devpts {merged}/dev/pts -o nosuid,newinstance,ptmxmode=0666 2>/dev/null || true",
             f"ln -sf pts/ptmx {merged}/dev/ptmx 2>/dev/null || true",
+        ])
+
+        # Custom device passthrough (e.g., /dev/kvm, /dev/fuse)
+        # Bind-mount from host devtmpfs preserves the original superblock
+        # (no SB_I_NODEV), so the device is usable if the user has the
+        # required group membership (e.g., kvm group for /dev/kvm).
+        if self._config.devices:
+            lines.append("")
+            lines.append("# Device passthrough (bind mount from host)")
+            for dev_path in self._config.devices:
+                dev_name = dev_path.lstrip("/")
+                target = f"{merged}/{dev_name}"
+                parent = str(Path(dev_name).parent)
+                if parent and parent != ".":
+                    lines.append(f"mkdir -p {merged}/{parent} 2>/dev/null || true")
+                lines.append(f"touch {target} 2>/dev/null || true")
+                lines.append(f"mount --bind {dev_path} {target} 2>/dev/null || true")
+
+        lines.extend([
             "",
             "# Propagate DNS: copy host resolv.conf if sandbox one is empty/missing",
             f"if [ ! -s {merged}/etc/resolv.conf ] && [ -s /etc/resolv.conf ]; then",
@@ -369,15 +394,8 @@ class RootlessSandbox(RootfulSandbox):
         # 1. Create a new netns via unshare --net, bind-mount it
         # 2. Run pasta (still in host netns, can bind host ports)
         # 3. nsenter --net into the new netns for chroot
-        # Set hostname before chroot (adl-seccomp makes /proc/sys read-only)
-        if self._config.hostname:
-            import shlex as _shlex
-            hn = _shlex.quote(self._config.hostname)
-            lines.extend([
-                "",
-                "# Hostname (must be set before adl-seccomp makes /proc/sys read-only)",
-                f"{{ echo {hn} > /proc/sys/kernel/hostname; }} 2>/dev/null || hostname {hn} 2>/dev/null || true",
-            ])
+        # Hostname is set by adl-seccomp via sethostname() syscall
+        # (reads /tmp/.adl_hostname, written to upper dir above).
 
         port_map = self._config.port_map
         # Use adl-seccomp for cap drop + mask + readonly + seccomp BPF.

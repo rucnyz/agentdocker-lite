@@ -105,7 +105,7 @@ SandboxConfig(
     writable_paths=["/workspace"],  # Landlock: only these paths writable (None=no restriction)
     readable_paths=["/usr", "/lib"],# Landlock: only these paths readable (None=no restriction)
     allowed_ports=[80, 443],        # Landlock: only these TCP ports connectable (None=no restriction)
-    # Devices (root only)
+    # Devices (rootless: user must have group access, e.g. kvm group)
     devices=["/dev/nvidia0", "/dev/nvidiactl"],
 )
 ```
@@ -251,7 +251,7 @@ Reproduce: `python examples/benchmark.py`
 | `-p 8080:80` | `net_isolate=True, port_map=["8080:80"]` |
 | `docker checkpoint create` (CRIU) | `CheckpointManager(sb).save("/path")` |
 | `docker start --checkpoint` | `CheckpointManager(sb).restore("/path")` |
-| `--gpus all` | `devices=["/dev/nvidia0", ...]` (root only) |
+| `--gpus all` | `devices=["/dev/nvidia0", ...]` |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
 

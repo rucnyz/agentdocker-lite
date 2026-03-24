@@ -224,6 +224,72 @@ def demo_port_mapping():
         sb.delete()
 
 
+def demo_qemu_vm():
+    """Demonstrate QemuVM for QEMU/KVM management inside sandbox.
+
+    Starts a QEMU VM with an empty disk, tests savevm/loadvm for
+    fast VM state reset (the RL episode reset primitive for GUI agents).
+
+    Requires: /dev/kvm accessible (user in kvm group), QEMU installed
+    in the sandbox image.
+    """
+    from agentdocker_lite.vm import QemuVM
+
+    if not QemuVM.check_available():
+        print("  SKIP (KVM not available or no access)")
+        return
+
+    vm_dir = tempfile.mkdtemp(prefix="adl_vm_")
+    disk = os.path.join(vm_dir, "test.qcow2")
+    subprocess.run(
+        ["qemu-img", "create", "-f", "qcow2", disk, "64M"],
+        capture_output=True,
+    )
+
+    config = SandboxConfig(
+        image="ubuntu:22.04",
+        devices=["/dev/kvm"],
+        volumes=[f"{vm_dir}:/vm:rw"],
+    )
+    sb = Sandbox(config, name="vm-demo")
+
+    # Check if QEMU is installed in the sandbox
+    _, ec = sb.run("which qemu-system-x86_64 >/dev/null 2>&1")
+    if ec != 0:
+        print("  SKIP (qemu-system-x86_64 not in sandbox image)")
+        print("  Install with: sb.run('apt-get install -y qemu-system-x86')")
+        sb.delete()
+        shutil.rmtree(vm_dir, ignore_errors=True)
+        return
+
+    vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+    vm.start(timeout=30)
+    print(f"  VM started: {vm}")
+
+    # Query status via QMP
+    status = vm.qmp("query-status")
+    print(f"  VM status: {status['return']['status']}")
+
+    # Save VM snapshot
+    import time
+    t0 = time.monotonic()
+    vm.savevm("ready")
+    print(f"  savevm: {(time.monotonic() - t0) * 1000:.0f}ms")
+
+    # Load VM snapshot (episode reset)
+    t0 = time.monotonic()
+    vm.loadvm("ready")
+    print(f"  loadvm: {(time.monotonic() - t0) * 1000:.0f}ms")
+
+    # List snapshots
+    info = vm.info_snapshots()
+    print(f"  snapshots: {'ready' in info}")
+
+    vm.stop()
+    sb.delete()
+    shutil.rmtree(vm_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     main()
     print()
@@ -232,3 +298,6 @@ if __name__ == "__main__":
     print()
     print("=== Port Mapping Demo ===")
     demo_port_mapping()
+    print()
+    print("=== QEMU/KVM Demo ===")
+    demo_qemu_vm()

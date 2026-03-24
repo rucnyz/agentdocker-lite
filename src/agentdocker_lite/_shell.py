@@ -159,12 +159,8 @@ class _PersistentShell:
             # All done inside the new root — no host tools or glibc needed.
             rootfs_q = shlex.quote(str(self._rootfs))
 
-            # hostname must be set before seccomp (blocks sethostname).
-            # Try /proc write first (no binary needed), fall back to hostname cmd.
-            hostname_cmd = ""
-            if self._hostname:
-                hn = shlex.quote(self._hostname)
-                hostname_cmd = f"{{ echo {hn} > /proc/sys/kernel/hostname; }} 2>/dev/null || hostname {hn} 2>/dev/null || true; "
+            # Hostname is set by adl-seccomp via sethostname() syscall
+            # (reads /tmp/.adl_hostname written by Python init/reset).
 
             seccomp_wrap = "/tmp/.adl_seccomp " if self._seccomp else ""
 
@@ -183,8 +179,7 @@ class _PersistentShell:
             #    _cleanup_pivot_old (rslave + umount via setns).
             pivot_script = (
                 "mount --make-rslave / && "
-                + hostname_cmd
-                + f"cd {rootfs_q} && "
+                f"cd {rootfs_q} && "
                 "mkdir -p .pivot_old && "
                 "pivot_root . .pivot_old && "
                 "cd / && "
@@ -313,20 +308,14 @@ class _PersistentShell:
             os.close(sync_w)
             self._sync_fds = None
 
-        # Security (mask/readonly/seccomp/cap-drop) is handled by adl-seccomp
-        # which runs before the shell starts. Init script only does hostname + cd.
-        _hostname_snippet = (
-            f"{{ echo {shlex.quote(self._hostname)} > /proc/sys/kernel/hostname; }} 2>/dev/null || hostname {shlex.quote(self._hostname)} 2>/dev/null || true\n"
-            if self._hostname else ""
-        )
+        # Security (mask/readonly/seccomp/cap-drop) + hostname is handled
+        # by adl-seccomp. Init script only does cd + signal.
 
         if self._userns:
-            # User namespace: adl-seccomp handles mask/readonly/seccomp/cap-drop.
-            # Init script only does hostname + cd.
+            # User namespace: adl-seccomp handles everything.
             init_script = (
                 "PS1='' PS2=''\n"
-                + _hostname_snippet
-                + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
         else:

@@ -46,6 +46,7 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define NR_mkdir   83
 #define NR_symlink 88
 #define NR_mknod   133
+#define NR_sethostname 170
 #define NR_prctl   157
 #define NR_mount   165
 #define NR_execve  59
@@ -70,6 +71,8 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define PR_SET_SECCOMP      22
 #define SECCOMP_MODE_FILTER 2
 
+#define O_WRONLY  1
+#define O_CREAT   0100
 #define O_PATH    010000000
 #define O_CLOEXEC 02000000
 
@@ -301,6 +304,78 @@ static void _main(long argc, char **argv, char **envp) {
             sc5(NR_mount, (long)"devpts", (long)"/dev/pts", (long)"devpts", MS_NOSUID, (long)"newinstance,ptmxmode=0666");
             sc2(NR_symlink, (long)"pts/ptmx", (long)"/dev/ptmx");
             sc2(NR_mkdir, (long)"/dev/shm", 01777);
+
+            /* 1b. Device passthrough: bind-mount from /.pivot_old */
+            {
+                int dfd = sc2(NR_open, (long)"/tmp/.adl_devices", 0/*O_RDONLY*/);
+                if (dfd >= 0) {
+                    char dbuf[2048];
+                    long dn = sc3(NR_read, dfd, (long)dbuf, sizeof(dbuf) - 1);
+                    sc1(NR_close, dfd);
+                    sc1(NR_unlink, (long)"/tmp/.adl_devices");
+                    if (dn > 0) {
+                        dbuf[dn] = 0;
+                        int di = 0;
+                        while (di < dn) {
+                            int ds = di;
+                            while (di < dn && dbuf[di] != '\n') di++;
+                            dbuf[di] = 0;
+                            if (di > ds && dbuf[ds] == '/') {
+                                /* Construct source: /.pivot_old + path */
+                                char dsrc[512];
+                                const char *dpfx = "/.pivot_old";
+                                int dj = 0;
+                                while (dpfx[dj]) { dsrc[dj] = dpfx[dj]; dj++; }
+                                int dk = 0;
+                                while (dbuf[ds+dk] && dj < 510) dsrc[dj++] = dbuf[ds+dk++];
+                                dsrc[dj] = 0;
+
+                                /* mkdir parent (one level, e.g. /dev/dri) */
+                                char ddir[512];
+                                int dl = 0, dlast = -1;
+                                while (dbuf[ds+dl]) {
+                                    ddir[dl] = dbuf[ds+dl];
+                                    if (ddir[dl] == '/') dlast = dl;
+                                    dl++;
+                                }
+                                ddir[dl] = 0;
+                                if (dlast > 0) {
+                                    ddir[dlast] = 0;
+                                    sc2(NR_mkdir, (long)ddir, 0755);
+                                    ddir[dlast] = '/';
+                                }
+
+                                /* Create mount point (empty file) */
+                                int tfd = sc3(NR_open, (long)(dbuf+ds),
+                                              O_WRONLY|O_CREAT, 0644);
+                                if (tfd >= 0) sc1(NR_close, tfd);
+
+                                /* Bind-mount device from old root */
+                                sc5(NR_mount, (long)dsrc, (long)(dbuf+ds), 0, MS_BIND, 0);
+                            }
+                            di++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* 1c. Set hostname (before cap drop and seccomp block sethostname) */
+    {
+        int hfd = sc2(NR_open, (long)"/tmp/.adl_hostname", 0/*O_RDONLY*/);
+        if (hfd >= 0) {
+            char hbuf[256];
+            long hn = sc3(NR_read, hfd, (long)hbuf, sizeof(hbuf) - 1);
+            sc1(NR_close, hfd);
+            sc1(NR_unlink, (long)"/tmp/.adl_hostname");
+            if (hn > 0) {
+                /* Strip trailing newline */
+                while (hn > 0 && (hbuf[hn-1] == '\n' || hbuf[hn-1] == '\r'))
+                    hn--;
+                if (hn > 0)
+                    sc2(NR_sethostname, (long)hbuf, hn);
+            }
         }
     }
 

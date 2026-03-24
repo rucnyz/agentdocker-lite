@@ -1468,3 +1468,348 @@ class TestConfigCombinations:
             f"Sandbox env dir should be fully removed, but found: "
             f"{list(env_dir.rglob('*')) if env_dir.exists() else []}"
         )
+
+
+# ------------------------------------------------------------------ #
+#  Device passthrough (rootless)                                       #
+# ------------------------------------------------------------------ #
+
+
+class TestDevicesRootless:
+    """Verify device passthrough in rootless (user namespace) mode."""
+
+    @staticmethod
+    def _skip_if_root():
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+
+    def test_fuse_device_passthrough(self, tmp_path, shared_cache_dir):
+        """Bind-mounted /dev/fuse should be accessible in userns sandbox."""
+        self._skip_if_root()
+        _requires_docker()
+        if not os.path.exists("/dev/fuse"):
+            pytest.skip("/dev/fuse not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/fuse"],
+        )
+        sb = Sandbox(config, name="userns-dev-fuse")
+        try:
+            output, ec = sb.run("test -c /dev/fuse && echo exists")
+            assert ec == 0
+            assert "exists" in output
+            # Verify it's a real character device with correct major:minor
+            output, ec = sb.run("stat -c '%t:%T' /dev/fuse")
+            assert ec == 0
+            assert "a:e5" in output  # major 10, minor 229
+        finally:
+            sb.delete()
+
+    def test_kvm_device_passthrough(self, tmp_path, shared_cache_dir):
+        """Bind-mounted /dev/kvm should be accessible in userns sandbox."""
+        self._skip_if_root()
+        _requires_docker()
+        if not os.path.exists("/dev/kvm"):
+            pytest.skip("/dev/kvm not available")
+        # Check user has kvm group (required for rootless KVM access)
+        if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+            pytest.skip("no read/write access to /dev/kvm (need kvm group)")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/kvm"],
+        )
+        sb = Sandbox(config, name="userns-dev-kvm")
+        try:
+            output, ec = sb.run("test -c /dev/kvm && echo exists")
+            assert ec == 0
+            assert "exists" in output
+            # Verify it's a real character device with correct major:minor
+            output, ec = sb.run("stat -c '%t:%T' /dev/kvm")
+            assert ec == 0
+            assert "a:e8" in output  # major 10, minor 232
+        finally:
+            sb.delete()
+
+    def test_device_survives_reset(self, tmp_path, shared_cache_dir):
+        """Device passthrough should work after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        if not os.path.exists("/dev/fuse"):
+            pytest.skip("/dev/fuse not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/fuse"],
+        )
+        sb = Sandbox(config, name="userns-dev-reset")
+        try:
+            output, ec = sb.run("test -c /dev/fuse && echo before")
+            assert ec == 0
+            assert "before" in output
+
+            sb.reset()
+
+            output, ec = sb.run("test -c /dev/fuse && echo after")
+            assert ec == 0
+            assert "after" in output
+            # Still a real device after reset
+            output, ec = sb.run("stat -c '%t:%T' /dev/fuse")
+            assert ec == 0
+            assert "a:e5" in output
+        finally:
+            sb.delete()
+
+    def test_multiple_devices(self, tmp_path, shared_cache_dir):
+        """Multiple devices can be passed through simultaneously."""
+        self._skip_if_root()
+        _requires_docker()
+        devices = []
+        for dev in ["/dev/fuse", "/dev/kvm"]:
+            if os.path.exists(dev) and os.access(dev, os.R_OK):
+                devices.append(dev)
+        if len(devices) < 2:
+            pytest.skip("need at least 2 accessible devices (/dev/fuse, /dev/kvm)")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=devices,
+        )
+        sb = Sandbox(config, name="userns-multi-dev")
+        try:
+            for dev in devices:
+                output, ec = sb.run(f"test -c {dev} && echo ok")
+                assert ec == 0, f"device {dev} not accessible"
+                assert "ok" in output
+        finally:
+            sb.delete()
+
+    def test_device_with_seccomp(self, tmp_path, shared_cache_dir):
+        """Device passthrough works alongside seccomp filtering."""
+        self._skip_if_root()
+        _requires_docker()
+        if not os.path.exists("/dev/fuse"):
+            pytest.skip("/dev/fuse not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/fuse"],
+            seccomp=True,
+        )
+        sb = Sandbox(config, name="userns-dev-seccomp")
+        try:
+            # Device works
+            output, ec = sb.run("test -c /dev/fuse && echo ok")
+            assert ec == 0
+            assert "ok" in output
+            # Seccomp is active
+            output, ec = sb.run("cat /proc/self/status | grep Seccomp")
+            assert ec == 0
+            assert "2" in output
+        finally:
+            sb.delete()
+
+    def test_devices_feature_flag(self, tmp_path, shared_cache_dir):
+        """features dict should include 'devices' when devices configured."""
+        self._skip_if_root()
+        _requires_docker()
+        if not os.path.exists("/dev/fuse"):
+            pytest.skip("/dev/fuse not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/fuse"],
+        )
+        sb = Sandbox(config, name="userns-dev-feat")
+        try:
+            assert sb.features.get("devices") is True
+        finally:
+            sb.delete()
+
+    def test_nonexistent_device_graceful(self, tmp_path, shared_cache_dir):
+        """Non-existent device should not crash sandbox creation."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/does_not_exist_xyz"],
+        )
+        sb = Sandbox(config, name="userns-dev-noexist")
+        try:
+            # Sandbox should start fine, non-existent device just not mounted
+            output, ec = sb.run("echo works")
+            assert ec == 0
+            assert "works" in output
+            # The bind mount silently fails; the touch file may remain but
+            # should NOT be a character device (just a regular empty file)
+            output, ec = sb.run("test -c /dev/does_not_exist_xyz && echo char || echo not_char")
+            assert "not_char" in output
+        finally:
+            sb.delete()
+
+    def test_kvm_ioctl_works(self, tmp_path, shared_cache_dir):
+        """KVM ioctl should not be blocked by seccomp (only TIOCSTI is blocked)."""
+        self._skip_if_root()
+        _requires_docker()
+        if not os.path.exists("/dev/kvm"):
+            pytest.skip("/dev/kvm not available")
+        if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+            pytest.skip("no read/write access to /dev/kvm")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/kvm"],
+            seccomp=True,
+        )
+        sb = Sandbox(config, name="userns-kvm-ioctl")
+        try:
+            # Try python3 for ioctl test; skip if not available in image
+            output, ec = sb.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
+            if "no" in output:
+                # Fallback: just verify /dev/kvm is openable (not blocked by seccomp)
+                output, ec = sb.run(
+                    "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
+                )
+                assert ec == 0, f"Failed to open /dev/kvm: {output}"
+                assert "kvm_open=ok" in output
+            else:
+                # KVM_GET_API_VERSION ioctl (0xAE00) should succeed
+                output, ec = sb.run(
+                    "python3 -c '"
+                    "import fcntl, os; "
+                    "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
+                    "ver = fcntl.ioctl(fd, 0xAE00); "
+                    "os.close(fd); "
+                    "print(f\"kvm_api={ver}\")'"
+                )
+                assert ec == 0, f"KVM ioctl failed: {output}"
+                assert "kvm_api=12" in output
+        finally:
+            sb.delete()
+
+
+class TestDevicesRootful:
+    """Verify device passthrough in rootful mode."""
+
+    def test_fuse_device_passthrough(self, tmp_path, shared_cache_dir):
+        """Bind-mounted /dev/fuse should be accessible in rootful sandbox."""
+        _requires_root()
+        _requires_docker()
+        if not os.path.exists("/dev/fuse"):
+            pytest.skip("/dev/fuse not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/fuse"],
+        )
+        sb = Sandbox(config, name="root-dev-fuse")
+        try:
+            output, ec = sb.run("test -c /dev/fuse && echo exists")
+            assert ec == 0
+            assert "exists" in output
+            output, ec = sb.run("stat -c '%t:%T' /dev/fuse")
+            assert ec == 0
+            assert "a:e5" in output  # major 10, minor 229
+        finally:
+            sb.delete()
+
+    def test_device_survives_reset(self, tmp_path, shared_cache_dir):
+        """Device passthrough should work after reset in rootful mode."""
+        _requires_root()
+        _requires_docker()
+        if not os.path.exists("/dev/fuse"):
+            pytest.skip("/dev/fuse not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/fuse"],
+        )
+        sb = Sandbox(config, name="root-dev-reset")
+        try:
+            output, ec = sb.run("test -c /dev/fuse && echo before")
+            assert ec == 0
+            assert "before" in output
+
+            sb.reset()
+
+            output, ec = sb.run("test -c /dev/fuse && echo after")
+            assert ec == 0
+            assert "after" in output
+        finally:
+            sb.delete()
+
+    def test_kvm_ioctl_rootful(self, tmp_path, shared_cache_dir):
+        """KVM ioctl should work in rootful mode with seccomp."""
+        _requires_root()
+        _requires_docker()
+        if not os.path.exists("/dev/kvm"):
+            pytest.skip("/dev/kvm not available")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/kvm"],
+            seccomp=True,
+        )
+        sb = Sandbox(config, name="root-kvm-ioctl")
+        try:
+            output, ec = sb.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
+            if "no" in output:
+                output, ec = sb.run(
+                    "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
+                )
+                assert ec == 0, f"Failed to open /dev/kvm: {output}"
+                assert "kvm_open=ok" in output
+            else:
+                output, ec = sb.run(
+                    "python3 -c '"
+                    "import fcntl, os; "
+                    "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
+                    "ver = fcntl.ioctl(fd, 0xAE00); "
+                    "os.close(fd); "
+                    "print(f\"kvm_api={ver}\")'"
+                )
+                assert ec == 0, f"KVM ioctl failed: {output}"
+                assert "kvm_api=12" in output
+        finally:
+            sb.delete()
+
+    def test_devices_feature_flag(self, tmp_path, shared_cache_dir):
+        """features dict should include 'devices' in rootful mode."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            devices=["/dev/null"],
+        )
+        sb = Sandbox(config, name="root-dev-feat")
+        try:
+            assert sb.features.get("devices") is True
+        finally:
+            sb.delete()

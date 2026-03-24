@@ -250,11 +250,15 @@ config = SandboxConfig(
 )
 ```
 
-## GPU passthrough
+## Device passthrough
 
-For NVIDIA GPU access inside the sandbox, mount the device and driver libraries:
+Pass host devices into the sandbox. Works in both rootless and rootful modes — in rootless mode, devices are bind-mounted from the host devtmpfs (preserves the original superblock, no `SB_I_NODEV`). The user must have the required group membership (e.g., `kvm` group for `/dev/kvm`).
 
 ```python
+# KVM for VM-based workloads (e.g., OSWorld GUI agent training)
+config = SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"])
+
+# NVIDIA GPU access
 config = SandboxConfig(
     image="ubuntu:22.04",
     devices=["/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"],
@@ -267,7 +271,35 @@ config = SandboxConfig(
 )
 ```
 
-Device passthrough requires root. For rootless GPU access, consider mounting the GPU device with appropriate permissions beforehand.
+## QEMU/KVM Virtual Machines
+
+Run QEMU/KVM VMs inside sandboxes for GUI agent training (e.g., OSWorld). `QemuVM` manages the QEMU process and provides QMP-based `savevm`/`loadvm` for fast episode reset (1-5s vs 30-120s cold restart).
+
+```python
+from agentdocker_lite import Sandbox, SandboxConfig
+from agentdocker_lite.vm import QemuVM
+
+sb = Sandbox(SandboxConfig(
+    image="ubuntu:22.04",   # needs qemu-system-x86 installed
+    devices=["/dev/kvm"],
+    volumes=["/host/vms:/vms:rw"],
+))
+
+vm = QemuVM(sb, disk="/vms/osworld.qcow2", memory="4G", cpus=4)
+vm.start()              # boot VM, wait for QMP
+vm.savevm("ready")      # snapshot VM state
+
+# Episode loop:
+for episode in range(1000):
+    vm.loadvm("ready")  # restore snapshot (1-5s)
+    screenshot = vm.screenshot()
+    # ... agent actions ...
+
+vm.stop()
+sb.delete()
+```
+
+Rootless KVM requires the user to be in the `kvm` group (`sudo usermod -aG kvm $USER`).
 
 ## Security hardening
 
@@ -297,7 +329,7 @@ config = SandboxConfig(
 
 Essential paths (`/dev`, `/proc`, `/tmp`, `/sys`) are automatically included. If Landlock is not available (old kernel), restrictions are silently skipped.
 
-### Device passthrough (root only)
+### Device passthrough
 
 ```python
 config = SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"])
@@ -394,9 +426,9 @@ python examples/benchmark.py
 | `docker import` / `docker load` | `sb.fs_restore("/path")` (filesystem only) |
 | `docker checkpoint create` (CRIU) | `CheckpointManager(sb).save("/path")` (full process state) |
 | `docker start --checkpoint` | `CheckpointManager(sb).restore("/path")` |
-| `--gpus all` | `devices=["/dev/nvidia0", ...]` (root only) |
+| `--gpus all` | `devices=["/dev/nvidia0", ...]` |
 | `-e KEY=value` | `environment={"KEY": "value"}` |
-| `--device /dev/kvm` | `devices=["/dev/kvm"]` (root only) |
+| `--device /dev/kvm` | `devices=["/dev/kvm"]` |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
 | `--oom-score-adj 500` | `oom_score_adj=500` |

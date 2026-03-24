@@ -162,6 +162,20 @@ class RootfulSandbox(SandboxBase):
             tmp_dir.mkdir(parents=True, exist_ok=True)
             (tmp_dir / ".adl_landlock").write_text(ll_config)
 
+        # Device passthrough config (read by adl-seccomp after /dev setup)
+        if config.devices:
+            tmp_dir = self._rootfs / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_devices").write_text(
+                "\n".join(config.devices) + "\n"
+            )
+
+        # Hostname config (read by adl-seccomp before cap drop / seccomp)
+        if config.hostname:
+            tmp_dir = self._rootfs / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_hostname").write_text(config.hostname + "\n")
+
         # Read-only rootfs: create marker file so adl-seccomp remounts
         # / ro after mounting /proc and /dev but before seccomp blocks
         # mount(). Cannot remount here — pivot_root needs writable rootfs.
@@ -206,6 +220,7 @@ class RootfulSandbox(SandboxBase):
             "seccomp": config.seccomp,
             "landlock": ll_config is not None,
             "netns": config.net_isolate,
+            "devices": bool(config.devices),
             "timens": getattr(self._persistent_shell, "_timens", False),
             "cpuset_cpus": config.cpuset_cpus,
             "oom_score_adj": config.oom_score_adj,
@@ -337,15 +352,15 @@ class RootfulSandbox(SandboxBase):
             self._cleanup_cgroup()
 
         if self._env_dir.exists():
-            # Fix 000-perm dirs left by overlayfs kernel in userns mode
+            # Fix 000-perm entries left by overlayfs kernel in userns mode.
+            # Both work dirs AND upper dirs can have 000-perm children
+            # (overlayfs whiteouts, opaque dirs, dpkg lock files, etc.).
             if self._userns:
-                for work in self._env_dir.glob("*work*"):
-                    if work.is_dir():
-                        for child in work.rglob("*"):
-                            try:
-                                child.chmod(0o700)
-                            except OSError:
-                                pass
+                for child in self._env_dir.rglob("*"):
+                    try:
+                        child.chmod(0o700)
+                    except OSError:
+                        pass
             shutil.rmtree(self._env_dir, ignore_errors=True)
 
         self._unregister(self)
@@ -862,6 +877,22 @@ class RootfulSandbox(SandboxBase):
             marker = target / "tmp" / ".adl_readonly"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
+
+        # Device passthrough config (rootful only — userns uses setup script)
+        if self._config.devices and not skip_dev:
+            tmp_dir = target / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_devices").write_text(
+                "\n".join(self._config.devices) + "\n"
+            )
+
+        # Hostname config (adl-seccomp calls sethostname before cap drop)
+        if self._config.hostname:
+            tmp_dir = target / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_hostname").write_text(
+                self._config.hostname + "\n"
+            )
 
     def _reset_btrfs(self):
         result = subprocess.run(
