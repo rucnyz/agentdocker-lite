@@ -37,6 +37,9 @@ Repository = "https://github.com/opensage-agent/agentdocker-lite"
 "Bug Tracker" = "https://github.com/opensage-agent/agentdocker-lite/issues"
 Changelog = "https://github.com/opensage-agent/agentdocker-lite/blob/main/CHANGELOG.md"
 
+[project.scripts]
+adl = "agentdocker_lite.cli:main"
+
 [project.optional-dependencies]
 compose = ["pyyaml>=6.0"]
 dev = ["pytest>=9.0", "pyyaml>=6.0"]

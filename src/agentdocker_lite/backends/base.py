@@ -922,8 +922,17 @@ class SandboxBase(abc.ABC):
 
             pid_file = entry / ".pid"
             if not pid_file.exists():
-                # No .pid file — likely not ours or very old; skip
-                logger.debug("Skipping %s (no .pid file)", entry)
+                # No .pid file — orphaned sandbox dir (partial cleanup).
+                # If it has sandbox-like subdirs, clean it up.
+                if (entry / "work").exists() or (entry / "upper").exists():
+                    logger.info("Cleaning up orphaned sandbox dir %s (no .pid)", entry.name)
+                    for child in entry.rglob("*"):
+                        try:
+                            child.chmod(0o700)
+                        except OSError:
+                            pass
+                    shutil.rmtree(entry, ignore_errors=True)
+                    cleaned += 1
                 continue
 
             try:
@@ -932,24 +941,20 @@ class SandboxBase(abc.ABC):
                 logger.debug("Skipping %s (unreadable .pid file)", entry)
                 continue
 
-            # Check if process is alive.
-            # Use pidfd to lock in process identity and avoid PID reuse races.
-            from agentdocker_lite._pidfd import pidfd_open
-            pidfd = pidfd_open(pid)
-            if pidfd is not None:
-                # pidfd_open succeeded → PID exists → owner still alive.
-                alive = True
-                os.close(pidfd)
-            else:
-                # pidfd_open failed → PID dead or unsupported.
-                # Fallback to kill(0) for kernels without pidfd.
-                try:
-                    os.kill(pid, 0)
-                    alive = True
-                except ProcessLookupError:
-                    alive = False
-                except PermissionError:
-                    alive = True
+            # Check if process is alive (and not a zombie).
+            # Zombies still respond to kill(0) and pidfd_open, so we
+            # read /proc/{pid}/status to check the actual state.
+            alive = False
+            try:
+                with open(f"/proc/{pid}/status") as _f:
+                    for _line in _f:
+                        if _line.startswith("State:"):
+                            alive = "Z" not in _line and "X" not in _line
+                            break
+                    else:
+                        alive = True  # couldn't find State line, assume alive
+            except (FileNotFoundError, PermissionError):
+                alive = False
 
             if alive:
                 logger.debug("Sandbox %s owner pid %d still alive, skipping", entry.name, pid)
@@ -1001,7 +1006,12 @@ class SandboxBase(abc.ABC):
                 except OSError as e:
                     logger.debug("cgroup cleanup for %s (non-fatal): %s", entry.name, e)
 
-            # Remove directory
+            # Fix 000-perm dirs left by overlayfs kernel before rmtree
+            for child in entry.rglob("*"):
+                try:
+                    child.chmod(0o700)
+                except OSError:
+                    pass
             shutil.rmtree(entry, ignore_errors=True)
             cleaned += 1
 
