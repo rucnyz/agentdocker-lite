@@ -379,9 +379,23 @@ for sb in sandboxes:
     sb.delete()
 ```
 
+## CLI
+
+```bash
+adl ps                  # list running sandboxes
+adl kill <name>         # kill a sandbox and clean up
+adl kill --all          # kill all sandboxes
+adl cleanup             # remove stale sandbox directories
+adl --dir /path ps      # use custom sandbox base directory
+```
+
 ## Crash recovery
 
 Sandboxes auto-cleanup on process exit via `atexit`. For `kill -9` scenarios:
+
+```bash
+adl cleanup             # or from Python:
+```
 
 ```python
 from agentdocker_lite import SandboxBase
