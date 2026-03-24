@@ -429,40 +429,46 @@ class SandboxConfig:
             else:
                 val = ""
 
+            def _take() -> str:
+                """Return val if present, otherwise consume next arg."""
+                nonlocal i
+                if val:
+                    return val
+                i += 1
+                return args[i]
+
             if a in ("-v", "--volume"):
-                volumes.append(val or args[i + 1]); i += 1 if not val else 0
+                volumes.append(_take())
             elif a in ("-p", "--publish"):
-                ports.append(val or args[i + 1]); i += 1 if not val else 0
+                ports.append(_take())
             elif a in ("-e", "--env"):
-                entry = val or args[i + 1]; i += 1 if not val else 0
-                k, _, v = entry.partition("=")
+                k, _, v = _take().partition("=")
                 env[k] = v
             elif a == "--device":
-                devices.append((val or args[i + 1]).split(":")[0]); i += 1 if not val else 0
+                devices.append(_take().split(":")[0])
             elif a == "--dns":
-                dns.append(val or args[i + 1]); i += 1 if not val else 0
+                dns.append(_take())
             elif a in ("--cpus",):
-                kwargs["cpu_max"] = val or args[i + 1]; i += 1 if not val else 0
+                kwargs["cpu_max"] = _take()
             elif a in ("-m", "--memory"):
-                kwargs["memory_max"] = val or args[i + 1]; i += 1 if not val else 0
+                kwargs["memory_max"] = _take()
             elif a == "--pids-limit":
-                kwargs["pids_max"] = val or args[i + 1]; i += 1 if not val else 0
+                kwargs["pids_max"] = _take()
             elif a == "--cpuset-cpus":
-                kwargs["cpuset_cpus"] = val or args[i + 1]; i += 1 if not val else 0
+                kwargs["cpuset_cpus"] = _take()
             elif a in ("-h", "--hostname"):
-                kwargs["hostname"] = val or args[i + 1]; i += 1 if not val else 0
+                kwargs["hostname"] = _take()
             elif a in ("-w", "--workdir"):
-                kwargs["working_dir"] = val or args[i + 1]; i += 1 if not val else 0
+                kwargs["working_dir"] = _take()
             elif a == "--read-only":
                 kwargs["read_only"] = True
             elif a == "--privileged":
                 kwargs["seccomp"] = False
             elif a == "--network":
-                mode = val or args[i + 1]; i += 1 if not val else 0
-                if mode == "none":
+                if _take() == "none":
                     kwargs["net_isolate"] = True
             elif a == "--name":
-                i += 1 if not val else 0  # skip
+                _take()  # skip
             elif a in ("-d", "--detach", "--rm", "-i", "--interactive",
                        "-t", "--tty", "--init"):
                 if a in ("-t", "--tty"):
