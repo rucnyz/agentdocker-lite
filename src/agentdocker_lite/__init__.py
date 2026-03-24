@@ -22,4 +22,4 @@ __all__ = [
     "QemuVM",
     "get_image_config",
 ]
-__version__ = "0.0.1"
+__version__ = "0.0.5"
