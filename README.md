@@ -69,7 +69,7 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **Process checkpoint/restore**: Full process-state save/restore (memory, registers, fds) for RL partial rollout
 - **Port mapping**: Vendored `pasta` binary for NAT + TCP port forwarding, zero dependencies
 - **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
-- **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts (e.g. database init). ComposeProject combines entrypoint+CMD as background process matching Docker semantics
+- **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts before the shell (e.g. database init), with `exec "$@"` handoff
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
 - **Docker layer caching**: Shared base layers across images, skip pull when cached
 - **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces
@@ -166,12 +166,8 @@ SandboxConfig(
     # Devices (rootless: user must have group access, e.g. kvm group)
     devices=["/dev/nvidia0", "/dev/nvidiactl"],
 
-    # Capabilities
-    cap_add=["NET_RAW", "NET_ADMIN"],  # Extra capabilities to keep (applied at runtime via adl-seccomp)
-
     # OCI entrypoint (auto-filled from image config if not set)
-    # Direct Sandbox API: wraps the shell; ComposeProject: runs as background with CMD
-    entrypoint=["/docker-entrypoint.sh"],
+    entrypoint=["/docker-entrypoint.sh"],  # runs before shell, must end with exec "$@"
 )
 ```
 
