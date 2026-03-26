@@ -16,10 +16,8 @@ logger = logging.getLogger(__name__)
 def _apply_image_defaults(config: SandboxConfig) -> None:
     """Fill unset config fields from the OCI image config.
 
-    User-specified values always take precedence.  Only ``working_dir``
-    and ``environment`` are backfilled; ``cmd`` / ``entrypoint`` are not
-    applied here because sandbox commands are passed per-call via
-    ``run()``.
+    User-specified values always take precedence.  ``working_dir``,
+    ``environment``, and ``entrypoint`` are backfilled from the image.
     """
     if not config.image:
         return
@@ -42,6 +40,12 @@ def _apply_image_defaults(config: SandboxConfig) -> None:
         merged.update(config.environment)  # user wins
         config.environment = merged
         logger.debug("Merged %d image ENV vars", len(img_env))
+
+    # entrypoint: backfill only if user didn't set one explicitly
+    img_ep = img_cfg.get("entrypoint")
+    if img_ep and config.entrypoint is None:
+        config.entrypoint = img_ep
+        logger.debug("Applied image ENTRYPOINT: %s", img_ep)
 
 
 def Sandbox(config: SandboxConfig, name: str = "default") -> SandboxBase:

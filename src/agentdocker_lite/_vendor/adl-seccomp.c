@@ -2,8 +2,12 @@
  * Minimal security + init helper for agentdocker-lite sandboxes.
  * Zero libc dependency — raw syscalls only. ~13KB stripped.
  *
+ * After security setup (cap drop, proc mask, landlock, seccomp), forks:
+ *   - Parent stays as PID 1 init, reaps zombies (bubblewrap do_init pattern)
+ *   - Child execs the target program
+ *
  * Build: gcc -static -nostdlib -Os -march=x86-64 -fno-stack-protector \
- *            -o adl-seccomp adl-seccomp.c && strip adl-seccomp
+ *            -fno-builtin -o adl-seccomp adl-seccomp.c && strip adl-seccomp
  */
 
 /* ---- Raw syscall wrappers (x86_64) ---- */
@@ -49,8 +53,10 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define NR_sethostname 170
 #define NR_prctl   157
 #define NR_mount   165
+#define NR_clone   56
 #define NR_execve  59
 #define NR_exit    60
+#define NR_wait4   61
 
 /* Landlock syscall numbers (same on x86_64 and aarch64) */
 #define NR_landlock_create_ruleset 444
@@ -69,7 +75,14 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define PR_CAPBSET_DROP     24
 #define PR_SET_NO_NEW_PRIVS 38
 #define PR_SET_SECCOMP      22
+#define PR_SET_DUMPABLE     4
 #define SECCOMP_MODE_FILTER 2
+#define SIGCHLD 17
+
+/* Wait status macros (match kernel encoding, same as bubblewrap) */
+#define WIFEXITED(s)   (((s) & 0x7f) == 0)
+#define WEXITSTATUS(s) (((s) >> 8) & 0xff)
+#define WTERMSIG(s)    ((s) & 0x7f)
 
 #define O_WRONLY  1
 #define O_CREAT   0100
@@ -383,6 +396,11 @@ static void _main(long argc, char **argv, char **envp) {
     for (int c = 0; c <= 41; c++)
         if (!keep(c)) sc5(NR_prctl, PR_CAPBSET_DROP, c, 0, 0, 0);
 
+    /* 2b. Restore dumpable flag after cap drop (bubblewrap drop_privs pattern).
+     *     Without this, /proc/self becomes root-owned after cap drop,
+     *     preventing normal user processes from reading their own maps/status. */
+    sc5(NR_prctl, PR_SET_DUMPABLE, 1, 0, 0, 0);
+
     /* 3. Mask paths */
     for (int i = 0; masked[i]; i++) {
         struct kstat st;
@@ -431,10 +449,48 @@ static void _main(long argc, char **argv, char **envp) {
         }
     }
 
-    /* 8. exec target */
-    sc3(NR_execve, (long)argv[1], (long)(argv+1), (long)envp);
-    writes("adl-seccomp: exec failed\n");
-    sc1(NR_exit, 127);
+    /* 8. Fork: child execs target, parent stays as PID 1 init.
+     *    Reaps orphaned zombies — follows bubblewrap do_init() pattern.
+     *    See: https://github.com/containers/bubblewrap/blob/main/bubblewrap.c */
+    long child_pid = sc5(NR_clone, SIGCHLD, 0, 0, 0, 0);
+    if (child_pid < 0) {
+        /* clone failed — fall back to direct exec (best effort) */
+        sc3(NR_execve, (long)argv[1], (long)(argv+1), (long)envp);
+        writes("adl-seccomp: exec failed\n");
+        sc1(NR_exit, 127);
+    }
+
+    if (child_pid == 0) {
+        /* Child: exec the target program */
+        sc3(NR_execve, (long)argv[1], (long)(argv+1), (long)envp);
+        writes("adl-seccomp: exec failed\n");
+        sc1(NR_exit, 127);
+    }
+
+    /* Parent: PID 1 init — reap all children (bubblewrap do_init pattern).
+     * Loops on wait4(-1) until ECHILD, propagates initial child's exit status.
+     * This ensures orphaned processes are reaped instead of accumulating as
+     * zombies, which bash-as-PID-1 does not reliably do. */
+    {
+        int init_exit = 1;
+        for (;;) {
+            int status = 0;
+            long pid = sc5(NR_wait4, -1, (long)&status, 0, 0, 0);
+            if (pid == child_pid) {
+                /* Initial child exited — propagate its exit status
+                 * (bash-compatible: 128 + signal for signal deaths) */
+                if (WIFEXITED(status))
+                    init_exit = WEXITSTATUS(status);
+                else
+                    init_exit = 128 + WTERMSIG(status);
+            }
+            if (pid < 0) {
+                if (pid == -4) continue;   /* -EINTR: retry */
+                break;                     /* -ECHILD or other: done */
+            }
+        }
+        sc1(NR_exit, init_exit);
+    }
 }
 
 /* ASM entry: extract argc/argv/envp from stack, call _main */

@@ -124,6 +124,180 @@ class TestSeccomp:
         # CAP_CHOWN (0) should still be present (Docker default)
         assert cap_val & (1 << 0), "CAP_CHOWN should be kept"
 
+    def test_pid1_is_init(self, root_sandbox):
+        """PID 1 must be adl-seccomp init, not the shell (bubblewrap pattern).
+
+        adl-seccomp forks after security setup: parent stays as PID 1 init
+        (reaps zombies), child execs the shell.  Without this, bash is PID 1
+        and does not reliably reap orphaned processes.
+        """
+        output, ec = root_sandbox.run("cat /proc/1/comm")
+        assert ec == 0
+        pid1 = output.strip()
+        assert pid1 != "bash", (
+            f"PID 1 should be adl-seccomp init, not bash (got: {pid1!r})"
+        )
+        assert "adl_seccomp" in pid1, (
+            f"PID 1 should be adl-seccomp init (got: {pid1!r})"
+        )
+
+    def test_init_exit_code_propagation(self, root_sandbox):
+        """Init must propagate the shell's exit code faithfully."""
+        _, ec = root_sandbox.run("exit 0")
+        # After the shell exits, the sandbox restarts — but we can test
+        # non-zero exit codes of sub-commands.
+        _, ec = root_sandbox.run("bash -c 'exit 42'")
+        assert ec == 42, f"Expected exit code 42, got {ec}"
+        _, ec = root_sandbox.run("false")
+        assert ec == 1, f"Expected exit code 1, got {ec}"
+
+    def test_init_signal_exit_code(self, root_sandbox):
+        """Init must return 128+signal when child is killed by a signal."""
+        # SIGKILL (9) → exit code should be 137 (128+9)
+        _, ec = root_sandbox.run("bash -c 'kill -9 $$'")
+        assert ec == 137, f"Expected 137 (128+SIGKILL), got {ec}"
+
+
+
+# ------------------------------------------------------------------ #
+#  Entrypoint                                                           #
+# ------------------------------------------------------------------ #
+
+
+class TestEntrypoint:
+    """Verify OCI ENTRYPOINT is executed before the shell."""
+
+    def test_entrypoint_runs_on_start(self, tmp_path, shared_cache_dir):
+        """ENTRYPOINT script runs during sandbox init and creates a marker."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            entrypoint=["/bin/sh", "-c",
+                        "touch /tmp/.ep_ran; exec \"$@\"", "--"],
+        )
+        sb = Sandbox(config, name="ep-test")
+        try:
+            output, ec = sb.run("cat /tmp/.ep_ran 2>&1 && echo OK")
+            assert ec == 0, f"Entrypoint marker missing: {output}"
+            assert "OK" in output
+        finally:
+            sb.delete()
+
+    def test_entrypoint_env_setup(self, tmp_path, shared_cache_dir):
+        """ENTRYPOINT can set up environment visible to later commands."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            entrypoint=["/bin/sh", "-c",
+                        "mkdir -p /data && echo ready > /data/status; exec \"$@\"",
+                        "--"],
+        )
+        sb = Sandbox(config, name="ep-env")
+        try:
+            output, ec = sb.run("cat /data/status")
+            assert ec == 0
+            assert "ready" in output
+        finally:
+            sb.delete()
+
+    def test_entrypoint_survives_reset(self, tmp_path, shared_cache_dir):
+        """ENTRYPOINT re-runs after sandbox reset."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            entrypoint=["/bin/sh", "-c",
+                        "touch /tmp/.ep_ran; exec \"$@\"", "--"],
+        )
+        sb = Sandbox(config, name="ep-reset")
+        try:
+            # Verify entrypoint ran
+            _, ec = sb.run("test -f /tmp/.ep_ran")
+            assert ec == 0
+            # Delete marker and reset
+            sb.run("rm /tmp/.ep_ran")
+            sb.reset()
+            # After reset, entrypoint should have re-run
+            _, ec = sb.run("test -f /tmp/.ep_ran")
+            assert ec == 0, "Entrypoint did not re-run after reset"
+        finally:
+            sb.delete()
+
+    def test_no_entrypoint_works(self, root_sandbox):
+        """Sandbox without entrypoint still works normally."""
+        output, ec = root_sandbox.run("echo hello")
+        assert ec == 0
+        assert "hello" in output
+
+    def test_bad_entrypoint_fails_gracefully(self, tmp_path, shared_cache_dir):
+        """Non-existent entrypoint should fail at sandbox creation."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            entrypoint=["/nonexistent_entrypoint.sh"],
+        )
+        with pytest.raises(RuntimeError):
+            Sandbox(config, name="ep-bad")
+
+    def test_entrypoint_rootless(self, tmp_path, shared_cache_dir):
+        """ENTRYPOINT works in rootless (user namespace) mode."""
+        if os.geteuid() == 0:
+            pytest.skip("rootless test must run as non-root")
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            entrypoint=["/bin/sh", "-c",
+                        "touch /tmp/.ep_rootless; exec \"$@\"", "--"],
+        )
+        sb = Sandbox(config, name="ep-rootless")
+        try:
+            _, ec = sb.run("test -f /tmp/.ep_rootless")
+            assert ec == 0, "Entrypoint did not run in rootless mode"
+        finally:
+            sb.delete()
+
+    def test_image_entrypoint_backfill(self, tmp_path, shared_cache_dir):
+        """SandboxConfig.entrypoint is auto-filled from OCI image config."""
+        _requires_root()
+        _requires_docker()
+        from unittest.mock import patch
+
+        fake_cfg = {
+            "entrypoint": ["/bin/sh", "-c", "touch /tmp/.ep_auto; exec \"$@\"", "--"],
+            "cmd": None,
+            "env": {},
+            "working_dir": None,
+        }
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        assert config.entrypoint is None  # not set yet
+
+        with patch("agentdocker_lite.rootfs.get_image_config", return_value=fake_cfg):
+            sb = Sandbox(config, name="ep-auto")
+
+        try:
+            assert config.entrypoint == fake_cfg["entrypoint"]
+            _, ec = sb.run("test -f /tmp/.ep_auto")
+            assert ec == 0, "Auto-filled entrypoint did not run"
+        finally:
+            sb.delete()
+
 
 # ------------------------------------------------------------------ #
 #  Cleanup                                                              #

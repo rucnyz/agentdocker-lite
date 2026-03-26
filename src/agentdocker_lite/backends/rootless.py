@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -251,6 +252,7 @@ class RootlessSandbox(RootfulSandbox):
             subuid_range=subuid_range,
             shared_userns=config.shared_userns,
             ulimits=config.ulimits or None,
+            entrypoint=config.entrypoint,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 
@@ -449,7 +451,12 @@ class RootlessSandbox(RootfulSandbox):
         # Use adl-seccomp for cap drop + mask + readonly + seccomp BPF.
         # It skips /proc+/dev mount when .adl_skip_dev marker exists.
         seccomp_wrap = "/tmp/.adl_seccomp " if self._config.seccomp else ""
-        chroot_cmd = f"exec chroot {merged} {seccomp_wrap}{shell}{norc}"
+        # OCI ENTRYPOINT: prepend to shell exec so entrypoint runs
+        # initialization, then `exec "$@"` hands off to the shell.
+        ep_prefix = ""
+        if self._config.entrypoint:
+            ep_prefix = " ".join(shlex.quote(a) for a in self._config.entrypoint) + " "
+        chroot_cmd = f"exec chroot {merged} {seccomp_wrap}{ep_prefix}{shell}{norc}"
 
         if port_map:
             vendored = Path(__file__).parent.parent / "_vendor" / "pasta"

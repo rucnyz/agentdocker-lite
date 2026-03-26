@@ -284,6 +284,10 @@ class SandboxConfig:
     cap_add: list[str] = field(default_factory=list)
     ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
     # ulimits maps resource name → (soft, hard), e.g. {"nofile": (65536, 65536)}
+    entrypoint: Optional[list[str]] = None
+    # OCI ENTRYPOINT — runs before the shell, typically does initialization
+    # then `exec "$@"` to hand off to the shell.  Auto-filled from image
+    # config if not set explicitly.
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:

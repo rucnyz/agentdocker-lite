@@ -50,6 +50,7 @@ class _PersistentShell:
         systemd_scope_properties: Optional[list[str]] = None,
         hostname: Optional[str] = None,
         read_only: bool = False,
+        entrypoint: Optional[list[str]] = None,
         subuid_range: Optional[tuple[int, int, int]] = None,
         shared_userns: Optional[str] = None,
         ulimits: Optional[dict[str, tuple[int, int]]] = None,
@@ -67,6 +68,7 @@ class _PersistentShell:
         self._userns_setup_script = userns_setup_script
         self._systemd_scope_properties = systemd_scope_properties
         self._hostname = hostname
+        self._entrypoint = entrypoint
         self._read_only = read_only
         self._subuid_range = subuid_range  # (outer_id, sub_start, sub_count) or None
         self._shared_userns = shared_userns  # path to existing userns to join
@@ -186,6 +188,11 @@ class _PersistentShell:
             shell_exec = self._shell
             if "bash" in self._shell:
                 shell_exec += " --norc --noprofile"
+            # OCI ENTRYPOINT: prepend to shell exec so entrypoint runs
+            # initialization, then `exec "$@"` hands off to the shell.
+            if self._entrypoint:
+                ep = " ".join(shlex.quote(a) for a in self._entrypoint)
+                shell_exec = f"{ep} {shell_exec}"
 
             # Write seccomp BPF + static helper into rootfs BEFORE pivot_root.
             if self._seccomp:

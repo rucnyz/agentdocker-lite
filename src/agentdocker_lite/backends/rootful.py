@@ -218,9 +218,9 @@ class RootfulSandbox(SandboxBase):
             net_isolate=config.net_isolate,
             net_ns=config.net_ns,
             seccomp=config.seccomp,
-
             hostname=config.hostname,
             read_only=config.read_only,
+            entrypoint=config.entrypoint,
         )
         shell_ms = (time.monotonic() - t3) * 1000
 
