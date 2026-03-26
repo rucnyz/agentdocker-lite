@@ -693,13 +693,13 @@ class TestSharedNetwork:
             ), name="net-b")
 
             # Same network namespace
-            ns1, _ = sb1.run("readlink /proc/1/ns/net")
-            ns2, _ = sb2.run("readlink /proc/1/ns/net")
+            ns1, _ = sb1.run("readlink /proc/self/ns/net")
+            ns2, _ = sb2.run("readlink /proc/self/ns/net")
             assert ns1.strip() == ns2.strip()
 
             # Different mount namespaces (filesystem isolation)
-            mnt1, _ = sb1.run("readlink /proc/1/ns/mnt")
-            mnt2, _ = sb2.run("readlink /proc/1/ns/mnt")
+            mnt1, _ = sb1.run("readlink /proc/self/ns/mnt")
+            mnt2, _ = sb2.run("readlink /proc/self/ns/mnt")
             assert mnt1.strip() != mnt2.strip()
 
             sb2.delete()
@@ -730,8 +730,8 @@ class TestSharedNetwork:
                 net_ns=net_b.netns_path,
             ), name="iso-b")
 
-            ns1, _ = sb1.run("readlink /proc/1/ns/net")
-            ns2, _ = sb2.run("readlink /proc/1/ns/net")
+            ns1, _ = sb1.run("readlink /proc/self/ns/net")
+            ns2, _ = sb2.run("readlink /proc/self/ns/net")
             assert ns1.strip() != ns2.strip()
 
             sb2.delete()
