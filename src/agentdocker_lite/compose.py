@@ -17,10 +17,12 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shlex
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -507,6 +509,7 @@ class ComposeProject:
             self._compose_file, self._env,
         )
         self._startup_order = _topo_sort(self._defs)
+        self._image_map = self._resolve_image_map()
         self._sandboxes: dict[str, Sandbox] = {}
         self._bg_handles: dict[str, str] = {}  # service → bg handle
         self._volume_dir: Optional[Path] = None
@@ -620,21 +623,98 @@ class ComposeProject:
 
     # -- internals ----------------------------------------------------- #
 
+    def _resolve_image_map(self) -> dict[str, str]:
+        """Query ``docker compose config`` for resolved image names.
+
+        Uses ``docker compose config --format json`` to get the exact
+        image names that Docker Compose would use (including computed
+        names for ``build:``-only services).  Automatically builds
+        missing images for services that have a ``build:`` section.
+
+        Falls back to the ``image`` field from our own parser if the
+        Docker Compose CLI is unavailable.
+        """
+        mapping = self._query_compose_config()
+        if not mapping:
+            # Fallback: use image fields from our own parser (only
+            # covers services with an explicit image: field).
+            return {
+                name: svc.image
+                for name, svc in self._defs.items()
+                if svc.image
+            }
+
+        # Build missing images for services that have build: context
+        missing = [
+            name for name in self._defs
+            if self._defs[name].build
+            and name in mapping
+            and not self._image_exists_locally(mapping[name])
+        ]
+        if missing:
+            logger.info("Building missing images for: %s", ", ".join(missing))
+            build_cmd = [
+                "docker", "compose",
+                "-f", str(self._compose_file),
+                "build",
+            ] + missing
+            if self._project_name:
+                build_cmd[2:2] = ["-p", self._project_name]
+            subprocess.run(
+                build_cmd, check=True,
+                env={**os.environ, **(self._env or {})},
+            )
+
+        return mapping
+
+    def _query_compose_config(self) -> dict[str, str]:
+        """Run ``docker compose config --format json`` and parse results."""
+        cmd = [
+            "docker", "compose",
+            "-f", str(self._compose_file),
+            "config", "--format", "json",
+        ]
+        if self._project_name:
+            cmd[2:2] = ["-p", self._project_name]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+                env={**os.environ, **(self._env or {})},
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                return {
+                    name: svc["image"]
+                    for name, svc in (data.get("services") or {}).items()
+                    if svc.get("image")
+                }
+        except (FileNotFoundError, subprocess.TimeoutExpired,
+                json.JSONDecodeError) as e:
+            logger.debug("docker compose config unavailable: %s", e)
+        return {}
+
+    @staticmethod
+    def _image_exists_locally(image: str) -> bool:
+        """Check if a Docker/Podman image exists in the local store."""
+        try:
+            return subprocess.run(
+                ["docker", "image", "inspect", image],
+                capture_output=True, timeout=10,
+            ).returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
     def _resolve_image(self, svc: _Service) -> str:
         """Resolve the Docker image name for a service."""
-        if svc.image:
-            return svc.image
+        image = self._image_map.get(svc.name)
+        if image:
+            return image
         if svc.build:
-            # When only build is specified, the image must be pre-built.
-            # Compose convention: project_service
-            generated = f"{self._project_name}_{svc.name}"
-            logger.info(
-                "Service %s has no image field, trying %s "
-                "(run 'docker compose build' first if not built)",
-                svc.name,
-                generated,
+            raise ValueError(
+                f"Service {svc.name!r} uses 'build:' without 'image:'. "
+                f"Install Docker and run 'docker compose build', or add "
+                f"an explicit 'image:' field to the compose file."
             )
-            return generated
         raise ValueError(
             f"Service {svc.name!r}: no 'image' or 'build' specified"
         )

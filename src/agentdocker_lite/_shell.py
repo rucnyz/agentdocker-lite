@@ -454,15 +454,8 @@ class _PersistentShell:
 
         import shutil
         bpf_path.write_bytes(bpf_bytes)
-        dst = tmp_dir / ".adl_seccomp"
-        # Unlink first to avoid ETXTBSY if the previous init process
-        # (PID 1) still has the old binary mapped after a timeout kill.
-        try:
-            dst.unlink(missing_ok=True)
-        except OSError:
-            pass
-        shutil.copy2(str(helper_src), str(dst))
-        dst.chmod(0o755)
+        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+        (tmp_dir / ".adl_seccomp").chmod(0o755)
 
     def _cleanup_pivot_old(self) -> None:
         """Unmount /.pivot_old inside the shell's mount namespace.

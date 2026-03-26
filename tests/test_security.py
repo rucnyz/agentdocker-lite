@@ -124,38 +124,12 @@ class TestSeccomp:
         # CAP_CHOWN (0) should still be present (Docker default)
         assert cap_val & (1 << 0), "CAP_CHOWN should be kept"
 
-    def test_pid1_is_init(self, root_sandbox):
-        """PID 1 must be adl-seccomp init, not the shell (bubblewrap pattern).
-
-        adl-seccomp forks after security setup: parent stays as PID 1 init
-        (reaps zombies), child execs the shell.  Without this, bash is PID 1
-        and does not reliably reap orphaned processes.
-        """
-        output, ec = root_sandbox.run("cat /proc/1/comm")
-        assert ec == 0
-        pid1 = output.strip()
-        assert pid1 != "bash", (
-            f"PID 1 should be adl-seccomp init, not bash (got: {pid1!r})"
-        )
-        assert "adl_seccomp" in pid1, (
-            f"PID 1 should be adl-seccomp init (got: {pid1!r})"
-        )
-
-    def test_init_exit_code_propagation(self, root_sandbox):
-        """Init must propagate the shell's exit code faithfully."""
-        _, ec = root_sandbox.run("exit 0")
-        # After the shell exits, the sandbox restarts — but we can test
-        # non-zero exit codes of sub-commands.
+    def test_exit_code_propagation(self, root_sandbox):
+        """Shell exit codes must propagate correctly."""
         _, ec = root_sandbox.run("bash -c 'exit 42'")
         assert ec == 42, f"Expected exit code 42, got {ec}"
         _, ec = root_sandbox.run("false")
         assert ec == 1, f"Expected exit code 1, got {ec}"
-
-    def test_init_signal_exit_code(self, root_sandbox):
-        """Init must return 128+signal when child is killed by a signal."""
-        # SIGKILL (9) → exit code should be 137 (128+9)
-        _, ec = root_sandbox.run("bash -c 'kill -9 $$'")
-        assert ec == 137, f"Expected 137 (128+SIGKILL), got {ec}"
 
 
 

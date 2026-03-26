@@ -68,7 +68,7 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **Fast lifecycle**: ~7ms create, ~2ms delete
 - **Process checkpoint/restore**: Full process-state save/restore (memory, registers, fds) for RL partial rollout
 - **Port mapping**: Vendored `pasta` binary for NAT + TCP port forwarding, zero dependencies
-- **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop, PID 1 init with zombie reaping (bubblewrap pattern) — all on by default
+- **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
 - **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts before the shell (e.g. database init), with `exec "$@"` handoff
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
 - **Docker layer caching**: Shared base layers across images, skip pull when cached
@@ -296,9 +296,8 @@ Host kernel (shared)
   |     +-- chroot into overlayfs rootfs
   |     |     +-- lowerdir: shared base layers (read-only, cached)
   |     |     +-- upperdir: per-sandbox changes (cleared on reset)
-  |     +-- PID 1: adl-seccomp init (zombie reaper, bubblewrap pattern)
-  |     +-- PID 2: persistent bash (stdin/stdout pipes + signal fd)
-  |     +-- seccomp-bpf + Landlock + capability drop + PR_SET_DUMPABLE
+  |     +-- Persistent bash process (stdin/stdout pipes + signal fd)
+  |     +-- seccomp-bpf + Landlock + capability drop
   |     +-- cgroup v2 limits + PSI monitoring
   |
   +-- Sandbox "worker-1"

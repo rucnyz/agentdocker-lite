@@ -366,11 +366,10 @@ All security features are **on by default** with zero runtime overhead.
 
 ### Default protections (no configuration needed)
 
-- **PID 1 init**: dedicated init process (bubblewrap pattern) reaps zombie orphans, propagates exit codes (128+signal). Shell runs as PID 2.
 - **seccomp-bpf**: blocks 30+ dangerous syscalls (ptrace, mount, kexec, bpf, unshare, setns, etc.)
 - **Masked paths**: `/proc/kcore`, `/proc/keys`, `/proc/timer_list`, `/proc/sched_debug`, `/sys/firmware`, `/proc/scsi` bound to `/dev/null`
 - **Read-only paths**: `/proc/bus`, `/proc/fs`, `/proc/irq`, `/proc/sys`, `/proc/sysrq-trigger`
-- **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps), `PR_SET_DUMPABLE` restored after drop
+- **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps)
 - **Time namespace**: isolates monotonic/boottime clocks, ensures CRIU restore sees continuous time (kernel 5.6+)
 
 ### Landlock path/port restrictions
