@@ -615,7 +615,7 @@ class TestUserNamespace:
             sb.delete()
 
     def test_seccomp_active(self, userns_sandbox):
-        """Seccomp BPF is active in rootless mode (via adl-seccomp with skip_dev)."""
+        """Seccomp BPF is active in rootless mode (via Rust init chain)."""
         output, ec = userns_sandbox.run("cat /proc/self/status | grep Seccomp")
         assert ec == 0
         assert "2" in output  # Seccomp: 2 = filter mode

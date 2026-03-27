@@ -183,7 +183,7 @@ SandboxConfig(
     devices=["/dev/nvidia0", "/dev/nvidiactl"],
 
     # Capabilities
-    cap_add=["NET_RAW", "NET_ADMIN"],  # Extra capabilities to keep (applied at runtime via adl-seccomp)
+    cap_add=["NET_RAW", "NET_ADMIN"],  # Extra capabilities to keep (applied at runtime via Rust init chain)
 
     # OCI entrypoint (auto-filled from image config if not set)
     # Direct Sandbox API: wraps the shell; ComposeProject: runs as background with CMD
