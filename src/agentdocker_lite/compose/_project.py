@@ -420,13 +420,24 @@ class ComposeProject:
 
     @staticmethod
     def _write_hosts(sb: Sandbox, hosts: dict[str, str]) -> None:
-        """Write /etc/hosts entries for service name resolution."""
+        """Write /etc/hosts entries for service name resolution.
+
+        Docker creates /etc/hosts, /etc/hostname, /etc/resolv.conf via
+        bind mounts, bypassing the image filesystem entirely.  We emulate
+        that by force-creating /etc/hosts (removing any overlayfs whiteout
+        artifact first).
+        """
         hosts_lines = "\n".join(f"{ip}\t{name}" for name, ip in hosts.items())
         try:
             existing = sb.read_file("/etc/hosts")
         except Exception:
             existing = ""
-        # Ensure localhost is always resolvable
+            # /etc/hosts might be a whiteout directory artifact — remove it
+            try:
+                sb.run("rm -rf /etc/hosts", timeout=5)
+            except Exception:
+                pass
+        # Ensure localhost is always resolvable (Docker does this automatically)
         if "localhost" not in existing:
             existing = "127.0.0.1\tlocalhost\n::1\tlocalhost\n" + existing
         sb.write_file("/etc/hosts", existing.rstrip() + "\n" + hosts_lines + "\n")
