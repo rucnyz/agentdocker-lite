@@ -1324,3 +1324,74 @@ class TestHealthMonitor:
         # Should be healthy (the success in the middle reset the counter)
         assert mon.status == "healthy"
         mon.stop()
+
+    def test_exception_counts_as_failure(self):
+        """If sb.run() raises, it should count as a failed check."""
+        sb = MagicMock()
+        sb.run = MagicMock(side_effect=RuntimeError("connection lost"))
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=0, retries=3,
+        )
+        time.sleep(1.0)
+        assert mon.status == "unhealthy"
+        mon.stop()
+
+    def test_unhealthy_breaks_wait(self, tmp_path, shared_cache_dir):
+        """_wait_healthy should return early when monitor reports unhealthy."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                healthcheck:
+                  test: ["CMD-SHELL", "false"]
+                  interval: 0.5s
+                  timeout: 1s
+                  retries: 2
+                  start_period: 0s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hc-unhealthy",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        # up() should raise because health check always fails
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match="Health check failed"):
+            proj.up(timeout=30)
+        elapsed = time.monotonic() - t0
+        # Should fail fast (retries=2, interval=0.5s) — well before the
+        # 30s timeout.  Allow some headroom for sandbox creation.
+        assert elapsed < 15.0, f"took {elapsed:.1f}s, should fail fast"
+
+    def test_timeout_raises(self, tmp_path, shared_cache_dir):
+        """_wait_healthy should raise RuntimeError on timeout."""
+        compose = tmp_path / "docker-compose.yml"
+        # Health check that always fails (file never exists)
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /nonexistent"]
+                  interval: 30s
+                  timeout: 1s
+                  retries: 100
+                  start_period: 30s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hc-timeout",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        # Short timeout — should hit deadline before retries exhaust
+        with pytest.raises(RuntimeError, match="Health check failed"):
+            proj.up(timeout=5)
