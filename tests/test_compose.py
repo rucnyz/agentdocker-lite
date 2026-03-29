@@ -1317,6 +1317,126 @@ class TestComposeProject:
 # ------------------------------------------------------------------ #
 
 
+class TestDetachMode:
+    """Tests for up(detach=True) and health_status()/wait_healthy()."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+    def test_detach_returns_immediately(self, tmp_path, shared_cache_dir):
+        """up(detach=True) should return before health check passes."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 3 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-detach",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            t0 = time.monotonic()
+            proj.up(detach=True)
+            elapsed = time.monotonic() - t0
+            # Should return in <2s (sandbox creation only, no health wait)
+            assert elapsed < 3.0, f"detach took {elapsed:.1f}s, should be <3s"
+            # health_status should show "starting" (not yet healthy)
+            status = proj.health_status()
+            assert "app" in status
+            assert status["app"] in ("starting", "healthy")  # might be healthy already
+        finally:
+            proj.down()
+
+    def test_health_status_transitions(self, tmp_path, shared_cache_dir):
+        """health_status() should reflect monitor state changes."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 1 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+              worker:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-status",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up(detach=True)
+            # worker has no healthcheck → "none"
+            assert proj.health_status()["worker"] == "none"
+            # Wait for app to become healthy
+            proj.wait_healthy(timeout=15)
+            assert proj.health_status()["app"] == "healthy"
+        finally:
+            proj.down()
+
+    def test_wait_healthy_after_detach(self, tmp_path, shared_cache_dir):
+        """wait_healthy() should block until all checks pass."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 1 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-wait-after-detach",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up(detach=True)
+            proj.wait_healthy(timeout=15)
+            # After wait_healthy, service should be healthy
+            _, ec = proj.services["app"].run("test -f /tmp/ready")
+            assert ec == 0
+        finally:
+            proj.down()
+
+
 class TestExtraHostsAndSysctls:
     """Integration tests for extra_hosts and sysctls compose fields."""
 

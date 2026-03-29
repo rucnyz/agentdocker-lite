@@ -162,14 +162,18 @@ class ComposeProject:
         """Map of service name → running :class:`Sandbox`."""
         return dict(self._sandboxes)
 
-    def up(self, *, timeout: int = 120) -> None:
+    def up(self, *, timeout: int = 120, detach: bool = False) -> None:
         """Start all services in dependency order.
 
-        Creates sandboxes, runs service commands, and waits for health
-        checks to pass.
-
         Args:
-            timeout: Default health-check timeout per service (seconds).
+            timeout: Health-check timeout (seconds).  Only used when
+                *detach* is ``False`` (the default).
+            detach: If ``True``, return as soon as all services are
+                running — equivalent to ``docker compose up -d``.
+                Health monitors are started in the background; call
+                :meth:`wait_healthy` or poll :meth:`health_status`
+                to check readiness.  If ``False`` (default), block
+                until every health check passes (``--wait`` mode).
         """
         if self._sandboxes:
             raise RuntimeError("Project already running. Call down() first.")
@@ -188,28 +192,55 @@ class ComposeProject:
 
                 # Wait for deps that require service_healthy before
                 # starting this service (matches Docker Compose).
-                for dep_name, condition in svc.depends_on.items():
-                    if condition == "service_healthy":
-                        self._wait_healthy(dep_name, timeout)
+                if not detach:
+                    for dep_name, condition in svc.depends_on.items():
+                        if condition == "service_healthy":
+                            self._wait_healthy(dep_name, timeout)
 
                 sb = self._create_sandbox(svc, hosts_entries)
                 self._sandboxes[name] = sb
                 self._start_service(name, svc)
                 self._start_health_monitor(name, svc)
 
-            # After all services started, wait for every health check
-            # in parallel (equivalent to ``docker compose up --wait``).
-            self._wait_all_healthy(timeout)
+            if not detach:
+                # Block until every health check passes (--wait mode).
+                self._wait_all_healthy(timeout)
         except Exception:
             # Clean up on partial failure
             self.down()
             raise
 
         logger.info(
-            "ComposeProject %s: %d services started",
+            "ComposeProject %s: %d services started%s",
             self._project_name,
             len(self._sandboxes),
+            " (detached)" if detach else "",
         )
+
+    def health_status(self) -> dict[str, str]:
+        """Return health status of each monitored service.
+
+        Returns a dict mapping service name to status string:
+        ``"healthy"``, ``"unhealthy"``, ``"starting"``, or
+        ``"none"`` (no health check configured).
+
+        This is the ADL equivalent of reading ``docker compose ps``
+        health column.
+        """
+        result: dict[str, str] = {}
+        for name in self._startup_order:
+            mon = self._health_monitors.get(name)
+            result[name] = mon.status if mon else "none"
+        return result
+
+    def wait_healthy(self, timeout: int = 120) -> None:
+        """Block until all health checks pass.
+
+        Equivalent to ``docker compose up --wait``.  Raises
+        ``RuntimeError`` on timeout or if any service becomes
+        unhealthy.
+        """
+        self._wait_all_healthy(timeout)
 
     def down(self) -> None:
         """Stop and delete all sandboxes."""
