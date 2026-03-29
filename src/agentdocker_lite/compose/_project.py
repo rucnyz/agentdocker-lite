@@ -199,13 +199,16 @@ class ComposeProject:
         """
         mapping = self._query_compose_config()
         if not mapping:
-            # Fallback: use image fields from our own parser (only
-            # covers services with an explicit image: field).
-            return {
-                name: svc.image
-                for name, svc in self._defs.items()
-                if svc.image
-            }
+            # Fallback: use image fields from our own parser.
+            # For build-only services, infer {project}-{service} name.
+            project = self._project_name or self._compose_file.parent.name
+            fallback = {}
+            for name, svc in self._defs.items():
+                if svc.image:
+                    fallback[name] = svc.image
+                elif svc.build:
+                    fallback[name] = f"{project}-{name}"
+            return fallback
 
         # Build missing images for services that have build: context
         missing = [
@@ -246,11 +249,15 @@ class ComposeProject:
             )
             if result.returncode == 0:
                 data = json.loads(result.stdout)
-                return {
-                    name: svc["image"]
-                    for name, svc in (data.get("services") or {}).items()
-                    if svc.get("image")
-                }
+                project = data.get("name", self._project_name or "default")
+                mapping = {}
+                for name, svc in (data.get("services") or {}).items():
+                    if svc.get("image"):
+                        mapping[name] = svc["image"]
+                    elif svc.get("build"):
+                        # build-only service: docker compose tags as {project}-{service}
+                        mapping[name] = f"{project}-{name}"
+                return mapping
         except (FileNotFoundError, subprocess.TimeoutExpired,
                 json.JSONDecodeError) as e:
             logger.debug("docker compose config unavailable: %s", e)
