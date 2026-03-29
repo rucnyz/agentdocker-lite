@@ -426,6 +426,9 @@ class ComposeProject:
             existing = sb.read_file("/etc/hosts")
         except Exception:
             existing = ""
+        # Ensure localhost is always resolvable
+        if "localhost" not in existing:
+            existing = "127.0.0.1\tlocalhost\n::1\tlocalhost\n" + existing
         sb.write_file("/etc/hosts", existing.rstrip() + "\n" + hosts_lines + "\n")
 
     def _cmd_string(self, svc: _Service) -> str | None:
