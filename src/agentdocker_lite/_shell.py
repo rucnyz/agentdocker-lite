@@ -311,9 +311,10 @@ class _PersistentShell:
                 self.start()
 
             working_dir = self._config.get("working_dir", "/")
+            shell = os.path.basename(self._config.get("shell", "bash"))
             script = (
                 f"cd {shlex.quote(working_dir)} 2>/dev/null\n"
-                f"bash -c {shlex.quote(command)} </dev/null 2>&1\n"
+                f"{shell} -c {shlex.quote(command)} </dev/null 2>&1\n"
                 f"echo $? >&{self._signal_fd}\n"
             )
 
