@@ -556,14 +556,16 @@ class ComposeProject:
 
         interval = _parse_duration(hc.get("interval", "10s"))
         hc_timeout = _parse_duration(hc.get("timeout", "5s"))
-        start_period = _parse_duration(hc.get("start_period", "0s"))
+        # start_period intentionally ignored — Docker polls immediately and
+        # only uses it as a grace window for failure accounting.  We just
+        # poll from the start and return as soon as the check passes.
 
         sb = self._sandboxes[name]
 
-        if start_period > 0:
-            time.sleep(start_period)
-
-        deadline = time.monotonic() + default_timeout
+        # Poll immediately.  If the service becomes healthy during the
+        # start_period we return at once (no need to wait it out).
+        t0 = time.monotonic()
+        deadline = t0 + default_timeout
         attempt = 0
         while time.monotonic() < deadline:
             attempt += 1
