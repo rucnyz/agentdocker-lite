@@ -245,8 +245,9 @@ class Sandbox:
         handle = uuid.uuid4().hex[:8]
         out_file = f"/tmp/.bg_{handle}.out"
         pid_file = f"/tmp/.bg_{handle}.pid"
+        shell = os.path.basename(self._shell)
         self.run(
-            f"nohup bash -c {shlex.quote(command)} > {out_file} 2>&1 & echo $! > {pid_file}"
+            f"nohup {shell} -c {shlex.quote(command)} > {out_file} 2>&1 & echo $! > {pid_file}"
         )
         pid_str, _ = self.run(f"cat {pid_file} 2>/dev/null")
         self._bg_handles[handle] = pid_str.strip()
