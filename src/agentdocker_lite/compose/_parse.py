@@ -88,6 +88,10 @@ class _Service:
     cpu_shares: int | None = None
     mem_limit: str | None = None
     memswap_limit: str | None = None
+    extra_hosts: list[str] = field(default_factory=list)
+    # "host:ip" entries appended to /etc/hosts
+    sysctls: dict[str, str] = field(default_factory=dict)
+    # kernel sysctl key → value, written to /proc/sys/
 
 
 def _parse_environment(raw: Any) -> dict[str, str]:
@@ -163,9 +167,14 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "security_opt", "cap_add", "privileged", "stop_grace_period",
     "ulimits", "shm_size", "tmpfs", "cpu_shares",
     "mem_limit", "memswap_limit", "env_file",
+    # Functional support
+    "extra_hosts", "sysctls",
     # Parsed but not mapped (informational / ignored safely)
     "container_name", "profiles", "stdin_open", "tty",
-    "extra_hosts", "labels", "logging",
+    "labels", "logging",
+    # Parsed, ignored with log (rootless makes these less meaningful,
+    # or they need Rust core changes for real support)
+    "init", "user", "pid", "ipc",
     # Not needed: host networking replaces custom networks
     "networks",
 })
@@ -277,6 +286,8 @@ def _parse_compose(
             cpu_shares=int(svc["cpu_shares"]) if svc.get("cpu_shares") else None,
             mem_limit=svc.get("mem_limit"),
             memswap_limit=svc.get("memswap_limit"),
+            extra_hosts=[str(h) for h in (svc.get("extra_hosts") or [])],
+            sysctls={str(k): str(v) for k, v in (svc.get("sysctls") or {}).items()},
         )
 
     return services, named_volumes

@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 - **`/etc/hosts` written from inside sandbox**: Uses `sb.run()` instead of host-side `write_file()` to ensure overlay mount namespace sees the change.
 - **Alpine shell compatibility**: `run()` and `run_background()` use detected shell instead of hardcoded `bash`.
 
+### Added
+- **`extra_hosts`**: Compose `extra_hosts` entries are now written to `/etc/hosts` inside the sandbox (also survives `reset()`).
+- **`sysctls`**: Compose `sysctls` are applied by writing to `/proc/sys/` inside the sandbox. Failures are logged but non-fatal (writability depends on kernel namespace support).
+- **`depends_on` condition**: `_parse_depends_on` now preserves `condition` (`service_started` / `service_healthy`). `up()` only blocks on `service_healthy` dependencies before starting dependents; `service_started` just ensures ordering.
+- **Parallel health check waiting**: After all services start, `_wait_all_healthy` polls all monitors simultaneously (equivalent to `docker compose up --wait`).
+- **`init`, `user`, `pid`, `ipc`**: No longer error — parsed and safely ignored (persistent shell handles zombie reaping; rootless mode makes `user` less meaningful; `pid`/`ipc` need Rust core changes for real support).
+
 ### Fixed
 - **Health check timeout**: Uses `default_timeout` as overall deadline instead of compose `retries` count.
 

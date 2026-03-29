@@ -254,10 +254,12 @@ class ComposeProject:
 
         for name in self._startup_order:
             sb = self._sandboxes.get(name)
+            svc = self._defs[name]
             if sb:
                 sb.reset()
                 # Re-write /etc/hosts (cleared by upper dir reset)
-                self._write_hosts(sb, hosts_entries)
+                self._write_hosts(sb, hosts_entries, svc.extra_hosts)
+                self._apply_sysctls(sb, svc)
 
         # Re-start all service commands after reset
         for name in self._startup_order:
@@ -507,20 +509,33 @@ class ComposeProject:
         config = SandboxConfig(**config_kwargs)
         sb = Sandbox(config, name=sandbox_name)
 
-        self._write_hosts(sb, hosts)
+        self._write_hosts(sb, hosts, svc.extra_hosts)
+        self._apply_sysctls(sb, svc)
         return sb
 
     @staticmethod
-    def _write_hosts(sb: Sandbox, hosts: dict[str, str]) -> None:
+    def _write_hosts(
+        sb: Sandbox,
+        hosts: dict[str, str],
+        extra_hosts: list[str] | None = None,
+    ) -> None:
         """Write /etc/hosts entries for service name resolution.
 
         Docker creates /etc/hosts, /etc/hostname, /etc/resolv.conf via
         bind mounts, bypassing the image filesystem.  We write from
         inside the sandbox (via ``run()``) to ensure the overlay mount
         sees the change immediately.
+
+        *extra_hosts* are ``"host:ip"`` strings from the compose
+        ``extra_hosts`` directive.
         """
         lines = ["127.0.0.1\tlocalhost", "::1\tlocalhost"]
         lines.extend(f"{ip}\t{name}" for name, ip in hosts.items())
+        # Append compose extra_hosts (format: "hostname:ip")
+        for entry in extra_hosts or []:
+            if ":" in entry:
+                host, ip = entry.split(":", 1)
+                lines.append(f"{ip.strip()}\t{host.strip()}")
         content = "\\n".join(lines) + "\\n"
         # Write from inside the sandbox so overlayfs upper is updated
         # within the mount namespace.  Remove any stale whiteout first.
@@ -531,6 +546,21 @@ class ComposeProject:
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _apply_sysctls(sb: Sandbox, svc: _Service) -> None:
+        """Apply ``sysctls`` by writing to ``/proc/sys/`` inside the sandbox."""
+        for key, value in svc.sysctls.items():
+            path = "/proc/sys/" + key.replace(".", "/")
+            try:
+                _, ec = sb.run(
+                    f"printf '%s' '{value}' > {path} 2>/dev/null",
+                    timeout=5,
+                )
+                if ec != 0:
+                    logger.debug("sysctl %s=%s failed (ec=%d)", key, value, ec)
+            except Exception:
+                logger.debug("sysctl %s=%s: exception", key, value)
 
     def _cmd_string(self, svc: _Service) -> str | None:
         """Build the shell command to start a service.

@@ -401,6 +401,92 @@ class TestParseCompose:
 
 
 # ------------------------------------------------------------------ #
+#  New compose fields                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestNewComposeFields:
+    """Parser tests for extra_hosts, sysctls, init, user, pid, ipc."""
+
+    def test_extra_hosts(self, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                extra_hosts:
+                  - "myhost:10.0.0.1"
+                  - "other:192.168.1.1"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].extra_hosts == ["myhost:10.0.0.1", "other:192.168.1.1"]
+
+    def test_sysctls_dict(self, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                sysctls:
+                  net.ipv4.ip_forward: "1"
+                  net.core.somaxconn: "1024"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].sysctls == {
+            "net.ipv4.ip_forward": "1",
+            "net.core.somaxconn": "1024",
+        }
+
+    def test_init_no_error(self, tmp_path):
+        """init: true should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                init: true
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+    def test_user_no_error(self, tmp_path):
+        """user field should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                user: "1000:1000"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+    def test_pid_no_error(self, tmp_path):
+        """pid field should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                pid: "host"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+    def test_ipc_no_error(self, tmp_path):
+        """ipc field should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                ipc: "host"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+
+# ------------------------------------------------------------------ #
 #  Topological sort                                                    #
 # ------------------------------------------------------------------ #
 
@@ -1222,6 +1308,119 @@ class TestComposeProject:
             # Verify the service is actually healthy
             _, ec = proj.services["app"].run("test -f /tmp/ready")
             assert ec == 0
+        finally:
+            proj.down()
+
+
+# ------------------------------------------------------------------ #
+#  Integration tests for extra_hosts and sysctls                       #
+# ------------------------------------------------------------------ #
+
+
+class TestExtraHostsAndSysctls:
+    """Integration tests for extra_hosts and sysctls compose fields."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+    def test_extra_hosts_in_etc_hosts(self, tmp_path, shared_cache_dir):
+        """extra_hosts entries should appear in /etc/hosts."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                extra_hosts:
+                  - "myapi:10.0.0.99"
+                  - "dbhost:192.168.1.50"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-extra-hosts",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            output, ec = proj.services["app"].run("cat /etc/hosts")
+            assert ec == 0
+            assert "10.0.0.99" in output and "myapi" in output
+            assert "192.168.1.50" in output and "dbhost" in output
+            # getent should resolve them
+            output2, ec2 = proj.services["app"].run("getent hosts myapi")
+            assert ec2 == 0
+            assert "10.0.0.99" in output2
+        finally:
+            proj.down()
+
+    def test_extra_hosts_survive_reset(self, tmp_path, shared_cache_dir):
+        """extra_hosts should persist after reset()."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                extra_hosts:
+                  - "custom:10.10.10.10"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-extra-hosts-reset",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            proj.reset()
+            output, ec = proj.services["app"].run("getent hosts custom")
+            assert ec == 0, f"extra_hosts lost after reset: {output}"
+            assert "10.10.10.10" in output
+        finally:
+            proj.down()
+
+    def test_sysctls_does_not_crash(self, tmp_path, shared_cache_dir):
+        """Compose file with sysctls should not crash up().
+
+        Actual sysctl writability depends on kernel namespace support
+        and /proc mount options.  This test verifies the mechanism
+        runs without error and the service starts successfully.
+        """
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                sysctls:
+                  net.ipv4.ip_forward: "1"
+                  kernel.hostname: "sysctl-test"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-sysctls",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            # Service should start successfully regardless of sysctl writability
+            output, ec = proj.services["app"].run("echo ok")
+            assert ec == 0
+            assert "ok" in output
         finally:
             proj.down()
 
