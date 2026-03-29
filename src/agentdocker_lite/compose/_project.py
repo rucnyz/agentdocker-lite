@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,79 @@ from agentdocker_lite.compose._parse import _Service, _parse_compose, _topo_sort
 from agentdocker_lite.compose._network import SharedNetwork, _parse_duration, _healthcheck_cmd
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------ #
+#  Health monitor (background daemon, mirrors Docker Engine)          #
+# ------------------------------------------------------------------ #
+
+class _HealthMonitor:
+    """Background health check daemon for a single service.
+
+    Mirrors Docker Engine behaviour:
+
+    * During ``start_period``, checks run every ``start_interval``
+      (default 5 s) and failures do **not** count toward the
+      consecutive-failure threshold.
+    * After ``start_period``, checks run every ``interval`` and
+      ``retries`` consecutive failures mark the service *unhealthy*.
+    * Any successful check immediately sets status to *healthy* and
+      resets the failure counter.
+
+    The :meth:`ComposeProject._wait_healthy` method polls
+    :attr:`status` every 500 ms (matching Docker Compose) instead of
+    executing the check command itself.
+    """
+
+    def __init__(
+        self,
+        sb: Sandbox,
+        cmd: str,
+        *,
+        interval: float = 10.0,
+        timeout: float = 5.0,
+        start_period: float = 0.0,
+        start_interval: float = 5.0,
+        retries: int = 3,
+    ) -> None:
+        self.status: str = "starting"
+        self._sb = sb
+        self._cmd = cmd
+        self._interval = interval
+        self._timeout = timeout
+        self._start_period = start_period
+        self._start_interval = start_interval
+        self._retries = retries
+        self._consecutive_failures = 0
+        self._stop = threading.Event()
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            in_start = (time.monotonic() - self._t0) < self._start_period
+            check_interval = self._start_interval if in_start else self._interval
+
+            try:
+                _, ec = self._sb.run(self._cmd, timeout=int(self._timeout) or 5)
+                if ec == 0:
+                    self._consecutive_failures = 0
+                    self.status = "healthy"
+                else:
+                    self._consecutive_failures += 1
+            except Exception:
+                self._consecutive_failures += 1
+
+            # During start_period, failures don't count
+            if not in_start and self._consecutive_failures >= self._retries:
+                self.status = "unhealthy"
+
+            self._stop.wait(check_interval)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
 
 
 class ComposeProject:
@@ -78,6 +152,8 @@ class ComposeProject:
         self._volume_dir: Path | None = None
         # network name → SharedNetwork instance
         self._shared_nets: dict[str, SharedNetwork] = {}
+        # service name → background health monitor
+        self._health_monitors: dict[str, _HealthMonitor] = {}
 
     # -- public API ---------------------------------------------------- #
 
@@ -126,6 +202,11 @@ class ComposeProject:
 
     def down(self) -> None:
         """Stop and delete all sandboxes."""
+        # Stop health monitors first
+        for mon in self._health_monitors.values():
+            mon.stop()
+        self._health_monitors.clear()
+
         # Reverse order for graceful shutdown
         for name in reversed(self._startup_order):
             sb = self._sandboxes.pop(name, None)
@@ -537,10 +618,13 @@ class ComposeProject:
     ) -> None:
         """Wait for a service's health check to pass.
 
-        Uses ``default_timeout`` as the overall deadline.  The loop
-        continues until the deadline expires — matching Docker Engine
-        behaviour where a container keeps retrying its health check
-        beyond the initial ``retries`` count.
+        Mirrors Docker's two-layer architecture:
+
+        * A :class:`_HealthMonitor` background thread acts as the
+          daemon, executing the check command at the compose-configured
+          ``interval`` / ``start_interval``.
+        * This method polls the monitor's ``status`` every 500 ms
+          (matching Docker Compose's ``convergence.go`` ticker).
         """
         hc = svc.healthcheck
         if not hc:
@@ -554,34 +638,39 @@ class ComposeProject:
         if not cmd:
             return
 
-        hc_timeout = _parse_duration(hc.get("timeout", "5s"))
-        # Docker Compose polls container status every 500ms (fixed),
-        # ignoring the compose ``interval`` (which is for the daemon).
-        # We match that cadence — the persistent shell makes execution
-        # cheap, and failed checks (connection refused) return fast.
-        poll_interval = 0.5
-
         sb = self._sandboxes[name]
 
-        deadline = time.monotonic() + default_timeout
-        attempt = 0
-        while time.monotonic() < deadline:
-            attempt += 1
-            try:
-                _, ec = sb.run(cmd, timeout=int(hc_timeout) or 5)
-                if ec == 0:
-                    logger.debug("Health check passed for %s (attempt %d)", name, attempt)
-                    return
-            except Exception:
-                pass
-            if time.monotonic() + poll_interval < deadline:
-                time.sleep(poll_interval)
-            else:
-                break
+        # Stop any previous monitor (e.g. from a prior reset cycle)
+        old = self._health_monitors.pop(name, None)
+        if old is not None:
+            old.stop()
 
+        monitor = _HealthMonitor(
+            sb,
+            cmd,
+            interval=_parse_duration(hc.get("interval", "10s")),
+            timeout=_parse_duration(hc.get("timeout", "5s")),
+            start_period=_parse_duration(hc.get("start_period", "0s")),
+            start_interval=_parse_duration(hc.get("start_interval", "5s")),
+            retries=int(hc.get("retries", 3)),
+        )
+        self._health_monitors[name] = monitor
+
+        # Poll status at 500ms — same as Docker Compose
+        deadline = time.monotonic() + default_timeout
+        while time.monotonic() < deadline:
+            if monitor.status == "healthy":
+                logger.debug("Health check passed for %s", name)
+                return
+            if monitor.status == "unhealthy":
+                break
+            time.sleep(0.5)
+
+        monitor.stop()
+        self._health_monitors.pop(name, None)
         raise RuntimeError(
             f"Health check failed for service {name!r} "
-            f"after {attempt} attempts ({default_timeout}s timeout)"
+            f"({default_timeout}s timeout, last status: {monitor.status})"
         )
 
     # -- context manager ----------------------------------------------- #
