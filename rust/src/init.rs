@@ -1077,25 +1077,21 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         mount_devices(&config.rootfs, &config.devices);
         propagate_dns(&config.rootfs);
         fix_tmp_perms(&config.rootfs);
-        // Mount default tmpfs at /tmp and /run BEFORE volumes:
-        // 1. Avoids overlayfs EOVERFLOW (inode overflow with userxattr on older kernels)
-        // 2. Matches Docker behaviour (writable scratch areas always work)
-        // 3. Volume bind-mounts (step after) will overlay on top if needed
-        for default_tmp in &[("/tmp", "mode=1777"), ("/run", "mode=0755")] {
-            let (path, opts) = *default_tmp;
-            if !config.tmpfs_mounts.iter().any(|s| s.starts_with(path)) {
-                let target = format!("{}{}", config.rootfs, path);
-                let _ = std::fs::create_dir_all(&target);
-                if let Err(e) = mnt(
-                    Some("tmpfs"), &target, Some("tmpfs"),
-                    MsFlags::empty(), Some(opts),
-                ) {
-                    log::debug!("default tmpfs {} mount failed: {}", path, e);
-                }
-            }
-        }
         mount_volumes(config);
         mount_tmpfs(config);
+        // Always mount tmpfs at /tmp to avoid overlayfs inode overflow
+        // (EOVERFLOW / "Value too large for defined data type") when creating
+        // temp files.  Only if /tmp is not already a user-requested tmpfs mount.
+        if !config.tmpfs_mounts.iter().any(|s| s.starts_with("/tmp")) {
+            let tmp_target = format!("{}/tmp", config.rootfs);
+            let _ = std::fs::create_dir_all(&tmp_target);
+            if let Err(e) = mnt(
+                Some("tmpfs"), &tmp_target, Some("tmpfs"),
+                MsFlags::empty(), Some("mode=1777"),
+            ) {
+                log::debug!("default tmpfs /tmp mount failed: {}", e);
+            }
+        }
 
         if !config.port_map.is_empty() {
             if let (Some(pb), Some(ed)) = (&config.pasta_bin, &config.env_dir) {
