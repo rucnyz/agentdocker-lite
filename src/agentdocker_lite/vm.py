@@ -378,12 +378,18 @@ class QemuVM:
             msg["arguments"] = arguments
         msg_json = json.dumps(msg)
 
-        # Try Rust binding (host-side, direct socket access)
+        # Try Rust binding (host-side, direct socket access).
+        # Prefer _host_qmp_path (set by caller for volume-mounted sockets)
+        # over _host_path() which may not resolve volume mounts correctly.
         try:
-            host_sock = self._sb._host_path(self._qmp_path)
-            if host_sock.exists():
+            host_sock_str = getattr(self, "_host_qmp_path", None)
+            if not host_sock_str:
+                host_sock = self._sb._host_path(self._qmp_path)
+                if host_sock.exists():
+                    host_sock_str = str(host_sock)
+            if host_sock_str and Path(host_sock_str).exists():
                 from agentdocker_lite._core import py_qmp_send
-                output = py_qmp_send(str(host_sock), msg_json, 30)
+                output = py_qmp_send(host_sock_str, msg_json, 30)
                 return json.loads(output)
         except (OSError, ImportError):
             pass  # fall through to sandbox-side helper
