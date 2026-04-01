@@ -3,7 +3,8 @@
 //! Connects to a QEMU QMP Unix socket, negotiates capabilities,
 //! sends a JSON command, and returns the response.  Host-side
 //! native Rust implementation callable directly from Python via
-//! PyO3.  The sandbox-side fallback binary is `rust/src/bin/nbx_qmp.rs`.
+//! PyO3.  Guest-side command execution uses QGA (QEMU Guest Agent)
+//! via `vm.py`, not this module.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

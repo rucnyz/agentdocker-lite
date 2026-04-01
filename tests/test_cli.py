@@ -23,7 +23,7 @@ def _requires_docker():
         pytest.skip("requires Docker")
 
 
-def _adl(*args: str) -> subprocess.CompletedProcess:
+def _nbx(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["python", "-m", "nitrobox.cli", *args],
         capture_output=True, text=True, timeout=10,
@@ -34,28 +34,28 @@ class TestCli:
     def test_ps_empty(self):
         """ps should work with no sandboxes."""
         _skip_if_root()
-        result = _adl("ps")
+        result = _nbx("ps")
         assert result.returncode == 0
         assert "No sandboxes" in result.stdout or "NAME" in result.stdout
 
     def test_cleanup_empty(self):
         """cleanup should work with nothing to clean."""
         _skip_if_root()
-        result = _adl("cleanup")
+        result = _nbx("cleanup")
         assert result.returncode == 0
         assert "No stale" in result.stdout or "Cleaned up" in result.stdout
 
     def test_kill_nonexistent(self):
         """kill should error on unknown sandbox."""
         _skip_if_root()
-        result = _adl("kill", "nonexistent-sandbox-xyz")
+        result = _nbx("kill", "nonexistent-sandbox-xyz")
         assert result.returncode != 0
         assert "not found" in result.stderr
 
     def test_no_args_shows_help(self):
         """No subcommand should show help."""
         _skip_if_root()
-        result = _adl()
+        result = _nbx()
         assert result.returncode == 0
         assert "usage" in result.stdout.lower() or "ps" in result.stdout
 
@@ -69,7 +69,7 @@ class TestCli:
         (orphan / "work" / "work").chmod(0o000)
         (orphan / "upper").mkdir()
 
-        result = _adl("--dir", env_dir, "cleanup")
+        result = _nbx("--dir", env_dir, "cleanup")
         assert result.returncode == 0
         assert not orphan.exists(), f"orphan dir not cleaned: {list(orphan.rglob('*'))}"
 
@@ -88,14 +88,14 @@ class TestCli:
             ), name=name)
             sandboxes.append(sb)
 
-        result = _adl("--dir", env_dir, "ps")
+        result = _nbx("--dir", env_dir, "ps")
         assert "kill-all-1" in result.stdout
         assert "kill-all-2" in result.stdout
 
-        result = _adl("--dir", env_dir, "kill", "--all")
+        result = _nbx("--dir", env_dir, "kill", "--all")
         assert result.returncode == 0
 
-        result = _adl("--dir", env_dir, "ps")
+        result = _nbx("--dir", env_dir, "ps")
         assert "No sandboxes" in result.stdout
 
     def test_ps_shows_running_sandbox(self, tmp_path, shared_cache_dir):
@@ -109,7 +109,7 @@ class TestCli:
             rootfs_cache_dir=shared_cache_dir,
         ), name="cli-ps-test")
         try:
-            result = _adl("--dir", env_dir, "ps")
+            result = _nbx("--dir", env_dir, "ps")
             assert result.returncode == 0
             assert "cli-ps-test" in result.stdout
             assert "running" in result.stdout
@@ -140,11 +140,11 @@ class TestCli:
         time.sleep(2)
 
         try:
-            result = _adl("--dir", env_dir, "ps")
+            result = _nbx("--dir", env_dir, "ps")
             assert "cli-kill-test" in result.stdout
 
             # nitrobox kill targets the shell process, not the owner
-            result = _adl("--dir", env_dir, "kill", "cli-kill-test")
+            result = _nbx("--dir", env_dir, "kill", "cli-kill-test")
             assert result.returncode == 0
             assert "killed" in result.stdout
 
@@ -174,11 +174,11 @@ class TestCli:
             rootfs_cache_dir=shared_cache_dir,
         ), name="kill-self-test")
 
-        result = _adl("--dir", env_dir, "ps")
+        result = _nbx("--dir", env_dir, "ps")
         assert "kill-self-test" in result.stdout
 
         # nitrobox kill should kill the shell, not us
-        result = _adl("--dir", env_dir, "kill", "kill-self-test")
+        result = _nbx("--dir", env_dir, "kill", "kill-self-test")
         assert result.returncode == 0
 
         # We're still alive — the test process wasn't killed

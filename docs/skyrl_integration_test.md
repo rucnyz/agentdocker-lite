@@ -160,5 +160,5 @@ This test matches Harbor's Docker flow: `docker build` → `docker run -d` → `
 | `nitrobox_environment.py` | `SkyRL_docker_test/examples/train_integrations/harbor/` | Harbor BaseEnvironment provider |
 | `run_harbor_gen_nitrobox.sh` | same directory | Generation-only test script |
 | `run_codecontest_nitrobox.sh` | same directory | Full training test script |
-| `AGENTDOCKER_INTEGRATION.md` | same directory | Quick-reference doc |
+| `NITROBOX_INTEGRATION.md` | same directory | Quick-reference doc |
 | `TestDockerComparison` | `nitrobox/tests/test_sandbox.py` | A/B benchmark test |
