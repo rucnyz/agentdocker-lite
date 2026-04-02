@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import urllib.error
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1901,10 +1902,10 @@ class TestDeleteCleansBackground:
 
 def _has_registry_access() -> bool:
     """Check if Docker Hub API is reachable and not rate-limited."""
+    from nitrobox._registry import get_diff_ids_from_registry
     try:
-        from nitrobox._registry import get_diff_ids_from_registry
         return get_diff_ids_from_registry("alpine:3.19") is not None
-    except Exception:
+    except (OSError, urllib.error.URLError, RuntimeError):
         return False
 
 

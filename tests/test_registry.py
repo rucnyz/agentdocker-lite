@@ -335,10 +335,11 @@ class TestPullImageLayers:
 
 def _has_network() -> bool:
     """Check Docker Hub API is reachable and not rate-limited."""
+    import urllib.error
+    from nitrobox._registry import get_diff_ids_from_registry
     try:
-        from nitrobox._registry import get_diff_ids_from_registry
         return get_diff_ids_from_registry("alpine:3.19") is not None
-    except Exception:
+    except (OSError, urllib.error.URLError, RuntimeError):
         return False
 
 
