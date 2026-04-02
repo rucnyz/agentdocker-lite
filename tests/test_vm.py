@@ -90,11 +90,11 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
     yield sb, str(vm_dir)
     sb.delete()
     # Verify no leftover socket files on the volume mount.
-    for name in (".nbx_qmp.sock", ".nbx_qga.sock", ".nbx_qmp_test.sock"):
-        sock = vm_dir / name
-        if sock.exists():
-            sock.unlink()
-            pytest.fail(f"Leftover socket after sandbox delete: {sock}")
+    leftover = list(vm_dir.glob("*.sock"))
+    for sock in leftover:
+        sock.unlink()
+    if leftover:
+        pytest.fail(f"Leftover sockets after sandbox delete: {leftover}")
 
 
 class TestQemuVM:
@@ -298,6 +298,9 @@ class TestRustQMP:
             assert parsed["return"]["status"] == "running"
         finally:
             vm.stop()
+            host_sock = Path(vm_dir) / ".nbx_qmp_test.sock"
+            assert not host_sock.exists(), \
+                "QMP socket not cleaned up after stop()"
 
 
 # ====================================================================== #
