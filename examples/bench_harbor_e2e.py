@@ -8,26 +8,51 @@ The benchmark includes a warmup phase to populate both Docker layer cache
 and nitrobox rootfs digest cache, so comparisons measure pure runtime
 overhead rather than one-time build costs.
 
-Requirements:
-    - Harbor installed: pip install harbor  (or from source)
-    - nitrobox installed: pip install nitrobox
-    - Docker daemon running
-    - A model endpoint (vLLM / OpenAI-compatible API) if using a real agent
+Setup:
+    # 1. Clone harbor (with nitrobox support)
+    git clone https://github.com/yuzhounie/harbor.git
+    cd harbor && git checkout feat/nitrobox-environment
+    uv sync --all-extras --dev
+
+    # 2. Install nitrobox
+    pip install nitrobox
+
+    # 3. Install uidmap (required for nitrobox rootless multi-UID mapping)
+    sudo apt-get install -y uidmap
+
+    # 4. Verify Docker is running
+    docker info
 
 Usage:
-    # Quick test (5 tasks, concurrency 1 and 4)
+    # Oracle agent (no API key needed, measures pure environment overhead)
     python examples/bench_harbor_e2e.py \\
         --harbor-dir /path/to/harbor \\
         --dataset terminal-bench@2.0 \\
         --agent oracle \\
         --n-tasks 5 --concurrency 1,4
 
-    # Full benchmark with real LLM agent
+    # Claude agent (real LLM, measures end-to-end including inference)
+    ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \\
+        --harbor-dir /path/to/harbor \\
+        --dataset terminal-bench@2.0 \\
+        --agent claude-code --model anthropic/claude-sonnet-4-6 \\
+        --n-tasks 5 --concurrency 1,4
+
+    # Custom agent with vLLM endpoint
+    MODEL_NAME=my-model MODEL_ENDPOINT=http://localhost:8002/v1 \\
     python examples/bench_harbor_e2e.py \\
         --harbor-dir /path/to/harbor \\
         --dataset swebench-verified \\
-        --agent claude-code --model anthropic/claude-sonnet-4-6 \\
+        --agent-import-path my_agent:MyAgent \\
         --n-tasks 20 --concurrency 1,4,8,16,32
+
+    # Full sweep (save results to JSON)
+    python examples/bench_harbor_e2e.py \\
+        --harbor-dir /path/to/harbor \\
+        --dataset terminal-bench@2.0 \\
+        --agent oracle \\
+        --n-tasks 20 --concurrency 1,4,8,16,32 \\
+        --output results.json
 
 Environment variables:
     MODEL_NAME         Model name for custom agents
