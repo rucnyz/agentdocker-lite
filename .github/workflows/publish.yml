@@ -12,21 +12,18 @@ env:
 
 jobs:
   build-wheel:
-    name: Build wheel (${{ matrix.target }})
+    name: Build wheel
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: x86_64
           args: --release --out dist
           manylinux: auto
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.target }}
+          name: wheel-x86_64
           path: dist/
 
   build-sdist:
