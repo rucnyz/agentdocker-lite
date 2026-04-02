@@ -2,13 +2,13 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in agentdocker-lite, please report it responsibly.
+If you discover a security vulnerability in nitrobox, please report it responsibly.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Instead, use one of the following:
 
-1. **GitHub Security Advisory** (preferred): [Report a vulnerability](https://github.com/opensage-agent/agentdocker-lite/security/advisories/new)
+1. **GitHub Security Advisory** (preferred): [Report a vulnerability](https://github.com/opensage-agent/nitrobox/security/advisories/new)
 2. **Email**: rucnyz@gmail.com
 
 Include:

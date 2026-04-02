@@ -1,10 +1,10 @@
-# Contributing to agentdocker-lite
+# Contributing to nitrobox
 
 ## Development setup
 
 ```bash
-git clone https://github.com/opensage-agent/agentdocker-lite.git
-cd agentdocker-lite
+git clone https://github.com/opensage-agent/nitrobox.git
+cd nitrobox
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
@@ -47,7 +47,7 @@ ruff check .
 
 ## Reporting bugs
 
-Open an issue on [GitHub Issues](https://github.com/opensage-agent/agentdocker-lite/issues) with:
+Open an issue on [GitHub Issues](https://github.com/opensage-agent/nitrobox/issues) with:
 - OS and kernel version (`uname -r`)
 - Python version
 - Steps to reproduce

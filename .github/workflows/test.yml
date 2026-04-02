@@ -71,3 +71,21 @@ jobs:
           cache: pip
       - run: pip install ruff
       - run: ruff check src/
+
+  rust:
+    name: Rust (clippy + audit + fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy (pedantic, deny warnings)
+        run: cargo clippy -- -D warnings
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit

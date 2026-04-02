@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark: agentdocker-lite vs Docker/Podman/OpenSandbox/SWE-MiniSandbox.
+"""Benchmark: nitrobox vs Docker/Podman/OpenSandbox/SWE-MiniSandbox.
 
 Usage:
     python examples/benchmark.py
@@ -15,7 +15,7 @@ import time
 
 IMAGE = "ubuntu:22.04"
 N_COMMANDS = 20
-CONTAINER_NAME = "adl-bench-docker"
+CONTAINER_NAME = "nbx-bench-docker"
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def bench_docker_concurrent() -> dict:
     results = {}
     for n in [4, 8, 16]:
         def worker(i):
-            name = f"adl-bench-docker-par-{i}"
+            name = f"nbx-bench-docker-par-{i}"
             subprocess.run(
                 ["docker", "run", "-d", "--name", name, IMAGE, "sleep", "infinity"],
                 capture_output=True, check=True,
@@ -134,7 +134,7 @@ def bench_docker_concurrent() -> dict:
 # Podman (rootless, same CLI as Docker)
 # ---------------------------------------------------------------------------
 
-PODMAN_CONTAINER = "adl-bench-podman"
+PODMAN_CONTAINER = "nbx-bench-podman"
 
 def _podman_available() -> bool:
     return subprocess.run(["podman", "--version"], capture_output=True).returncode == 0
@@ -422,17 +422,17 @@ def bench_swe_reset_loop() -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# agentdocker-lite
+# nitrobox
 # ---------------------------------------------------------------------------
 
 def bench_sandbox() -> dict:
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
 
     config = SandboxConfig(image=IMAGE, working_dir="/workspace")
 
     # Create
     t0 = time.monotonic()
-    sb = Sandbox(config, name="adl-bench-sandbox")
+    sb = Sandbox(config, name="nbx-bench-sandbox")
     create_ms = (time.monotonic() - t0) * 1000
 
     # Per-command latency
@@ -474,10 +474,10 @@ def bench_criu() -> dict | None:
     if os.geteuid() != 0:
         return None
 
-    from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+    from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
     config = SandboxConfig(image=IMAGE, working_dir="/workspace")
-    sb = Sandbox(config, name="adl-bench-criu")
+    sb = Sandbox(config, name="nbx-bench-criu")
 
     if not CheckpointManager.check_available():
         sb.delete()
@@ -489,7 +489,7 @@ def bench_criu() -> dict | None:
     # Save latency
     save_times = []
     for i in range(N_CRIU_ITERS):
-        ckpt = f"/tmp/adl_bench_ckpt_{i}"
+        ckpt = f"/tmp/nbx_bench_ckpt_{i}"
         shutil.rmtree(ckpt, ignore_errors=True)
         t0 = time.monotonic()
         mgr.save(ckpt)
@@ -500,12 +500,12 @@ def bench_criu() -> dict | None:
     for i in range(N_CRIU_ITERS):
         sb.run("echo modified > /workspace/test.txt")
         t0 = time.monotonic()
-        mgr.restore(f"/tmp/adl_bench_ckpt_{i}")
+        mgr.restore(f"/tmp/nbx_bench_ckpt_{i}")
         restore_times.append((time.monotonic() - t0) * 1000)
 
     sb.delete()
     for i in range(N_CRIU_ITERS):
-        shutil.rmtree(f"/tmp/adl_bench_ckpt_{i}", ignore_errors=True)
+        shutil.rmtree(f"/tmp/nbx_bench_ckpt_{i}", ignore_errors=True)
 
     return {
         "save_ms": sum(save_times) / len(save_times),
@@ -519,10 +519,10 @@ def bench_criu() -> dict | None:
 
 def bench_throughput() -> dict:
     """1000 sequential commands — measures sustained throughput."""
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
     N = 1000
 
-    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="adl-bench-tp")
+    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-tp")
     t0 = time.monotonic()
     for i in range(N):
         sb.run(f"echo {i}")
@@ -538,10 +538,10 @@ def bench_throughput() -> dict:
 
 def bench_reset_loop() -> dict:
     """run → reset → run → reset 100 times — simulates RL episode resets."""
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
     N = 100
 
-    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="adl-bench-reset")
+    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-reset")
     t0 = time.monotonic()
     for i in range(N):
         sb.run(f"echo episode-{i} > /workspace/state.txt")
@@ -564,16 +564,16 @@ def bench_checkpoint_loop() -> dict | None:
     if os.geteuid() != 0:
         return None
 
-    from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+    from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
-    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="adl-bench-ckpt-loop")
+    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-ckpt-loop")
     if not CheckpointManager.check_available():
         sb.delete()
         return None
 
     mgr = CheckpointManager(sb)
     N = 50
-    ckpt = "/tmp/adl_bench_ckpt_loop"
+    ckpt = "/tmp/nbx_bench_ckpt_loop"
 
     sb.run("echo base_state > /workspace/data.txt")
     shutil.rmtree(ckpt, ignore_errors=True)
@@ -600,9 +600,9 @@ def bench_ab_comparison() -> None:
 
     Matches Harbor's DockerEnvironment flow:
       Docker:           docker build → docker run -d → docker exec (N times) → docker rm -f
-      AgentDockerLite:  Sandbox(config) → sb.run() (N times) → sb.delete()
+      NitroBoxLite:  Sandbox(config) → sb.run() (N times) → sb.delete()
     """
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
 
     commands = [
         "echo hello",
@@ -612,29 +612,29 @@ def bench_ab_comparison() -> None:
         "echo done > /tmp/out.txt && cat /tmp/out.txt",
     ]
 
-    docker_tag = "adl_bench_docker"
-    docker_container = "adl_bench_container"
+    docker_tag = "nbx_bench_docker"
+    docker_container = "nbx_bench_container"
 
     N_ROUNDS = 5
 
-    # ── AgentDockerLite ──
+    # ── NitroBoxLite ──
     config = SandboxConfig(image=IMAGE, working_dir="/app")
     t0 = time.monotonic()
     sb = Sandbox(config, name="bench-ab")
-    adl_start = (time.monotonic() - t0) * 1000
+    nbx_start = (time.monotonic() - t0) * 1000
 
     # Run each command N_ROUNDS times, take median
-    adl_exec_all: dict[int, list[float]] = {i: [] for i in range(len(commands))}
+    nbx_exec_all: dict[int, list[float]] = {i: [] for i in range(len(commands))}
     for _ in range(N_ROUNDS):
         for i, cmd in enumerate(commands):
             t = time.monotonic()
             sb.run(cmd)
-            adl_exec_all[i].append((time.monotonic() - t) * 1000)
-    adl_exec_times = [sorted(adl_exec_all[i])[N_ROUNDS // 2] for i in range(len(commands))]
+            nbx_exec_all[i].append((time.monotonic() - t) * 1000)
+    nbx_exec_times = [sorted(nbx_exec_all[i])[N_ROUNDS // 2] for i in range(len(commands))]
 
     t0 = time.monotonic()
     sb.delete()
-    adl_stop = (time.monotonic() - t0) * 1000
+    nbx_stop = (time.monotonic() - t0) * 1000
 
     # ── Docker (matches Harbor's DockerEnvironment flow) ──
     subprocess.run(["docker", "rm", "-f", docker_container], capture_output=True)
@@ -670,41 +670,41 @@ def bench_ab_comparison() -> None:
 
     # ── Print comparison ──
     print(f"\n{'=' * 70}")
-    print(f"  A/B Benchmark: AgentDockerLite vs Docker (median of {N_ROUNDS} rounds)")
+    print(f"  A/B Benchmark: NitroBoxLite vs Docker (median of {N_ROUNDS} rounds)")
     print(f"  (Docker flow: build + run -d + exec + rm, like Harbor)")
     print(f"{'=' * 70}")
-    print(f"  {'Operation':30s} {'ADL':>10s} {'Docker':>10s} {'Speedup':>10s}")
+    print(f"  {'Operation':30s} {'NBX':>10s} {'Docker':>10s} {'Speedup':>10s}")
     print(f"  {'-'*30} {'-'*10} {'-'*10} {'-'*10}")
 
     def _row(label, a, d):
         sp = d / a if a > 0 else float("inf")
         print(f"  {label:30s} {a:7.1f} ms {d:7.1f} ms {sp:8.1f}x")
 
-    _row("Create / Start", adl_start, docker_start)
-    adl_exec_mean = sum(adl_exec_times) / len(adl_exec_times)
+    _row("Create / Start", nbx_start, docker_start)
+    nbx_exec_mean = sum(nbx_exec_times) / len(nbx_exec_times)
     docker_exec_mean = sum(docker_exec_times) / len(docker_exec_times)
-    _row("Exec (median avg)", adl_exec_mean, docker_exec_mean)
-    _row("Stop / Cleanup", adl_stop, docker_stop)
+    _row("Exec (median avg)", nbx_exec_mean, docker_exec_mean)
+    _row("Stop / Cleanup", nbx_stop, docker_stop)
 
     print()
-    print(f"  {'Per-command breakdown':30s} {'ADL':>10s} {'Docker':>10s} {'Speedup':>10s}")
+    print(f"  {'Per-command breakdown':30s} {'NBX':>10s} {'Docker':>10s} {'Speedup':>10s}")
     print(f"  {'-'*30} {'-'*10} {'-'*10} {'-'*10}")
     for i, cmd in enumerate(commands):
-        _row(cmd[:28], adl_exec_times[i], docker_exec_times[i])
+        _row(cmd[:28], nbx_exec_times[i], docker_exec_times[i])
     print("=" * 70)
 
 
 def bench_concurrent() -> dict:
     """Parallel sandboxes — measures scalability."""
     from concurrent.futures import ThreadPoolExecutor
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
 
     results = {}
     for n in [4, 8, 16]:
         def worker(i):
             sb = Sandbox(
                 SandboxConfig(image=IMAGE, working_dir="/workspace"),
-                name=f"adl-bench-par-{i}",
+                name=f"nbx-bench-par-{i}",
             )
             for j in range(10):
                 sb.run(f"echo {j}")
@@ -755,7 +755,7 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
         subprocess.run(["podman", "rm", "-f", PODMAN_CONTAINER], capture_output=True)
 
     print(f"Benchmarking with {IMAGE}, {N_COMMANDS} commands each")
-    backends = ["adl"]
+    backends = ["nbx"]
     if not skip_docker:
         backends.append("Docker")
     if not skip_podman:
@@ -767,9 +767,9 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
     print(f"Backends: {', '.join(backends)}\n")
 
     # Warmup: ensure rootfs is cached (first export is slow)
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
     print("Warming up (caching rootfs)...")
-    _sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name="adl-bench-warmup")
+    _sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name="nbx-bench-warmup")
     _sb.delete()
 
     docker = None
@@ -792,7 +792,7 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
         print("Running SWE-MiniSandbox benchmark...")
         swe = bench_swe()
 
-    print("Running agentdocker-lite benchmark...")
+    print("Running nitrobox benchmark...")
     sandbox = bench_sandbox()
 
     # Results table
@@ -805,7 +805,7 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
         cols.append(("OpenSandbox", opensandbox))
     if swe:
         cols.append(("SWE-Mini", swe))
-    cols.append(("adl", sandbox))
+    cols.append(("nbx", sandbox))
 
     header = f"{'':20}" + "".join(f" {name:>12}" for name, _ in cols)
     if len(cols) > 1:
@@ -822,8 +822,8 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
         for _, data in cols:
             row += f" {data[key]:>10.1f}ms"
         if len(cols) > 1:
-            # Speedup vs slowest non-adl backend
-            others = [d[key] for name, d in cols if name != "adl"]
+            # Speedup vs slowest non-nbx backend
+            others = [d[key] for name, d in cols if name != "nbx"]
             if others:
                 slowest = max(others)
                 sp = slowest / sandbox[key] if sandbox[key] > 0 else float("inf")
@@ -846,7 +846,7 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
     docker_tp = bench_docker_throughput() if not skip_docker else None
     os_tp = bench_opensandbox_throughput() if not skip_opensandbox else None
     swe_tp = bench_swe_throughput() if not skip_swe else None
-    adl_tp = bench_throughput()
+    nbx_tp = bench_throughput()
     if docker_tp:
         print(f"  Docker:      {docker_tp['ops_per_sec']:.0f} cmd/s  (avg {docker_tp['avg_ms']:.1f}ms)")
     if os_tp:
@@ -855,12 +855,12 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
         print(f"  SWE-Mini:    {swe_tp['ops_per_sec']:.0f} cmd/s  (avg {swe_tp['avg_ms']:.1f}ms)")
     comparisons = []
     if docker_tp:
-        comparisons.append(f"{adl_tp['ops_per_sec']/docker_tp['ops_per_sec']:.1f}x vs Docker")
+        comparisons.append(f"{nbx_tp['ops_per_sec']/docker_tp['ops_per_sec']:.1f}x vs Docker")
     if os_tp:
-        comparisons.append(f"{adl_tp['ops_per_sec']/os_tp['ops_per_sec']:.1f}x vs OpenSandbox")
+        comparisons.append(f"{nbx_tp['ops_per_sec']/os_tp['ops_per_sec']:.1f}x vs OpenSandbox")
     if swe_tp:
-        comparisons.append(f"{adl_tp['ops_per_sec']/swe_tp['ops_per_sec']:.1f}x vs SWE-Mini")
-    print(f"  adl:         {adl_tp['ops_per_sec']:.0f} cmd/s  (avg {adl_tp['avg_ms']:.1f}ms)"
+        comparisons.append(f"{nbx_tp['ops_per_sec']/swe_tp['ops_per_sec']:.1f}x vs SWE-Mini")
+    print(f"  nbx:         {nbx_tp['ops_per_sec']:.0f} cmd/s  (avg {nbx_tp['avg_ms']:.1f}ms)"
           + (f"  {', '.join(comparisons)}" if comparisons else ""))
 
     print("\nReset loop...")
@@ -868,7 +868,7 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
     docker_rl = bench_docker_reset_loop() if not skip_docker else None
     os_rl = bench_opensandbox_reset_loop() if not skip_opensandbox else None
     swe_rl = bench_swe_reset_loop() if not skip_swe else None
-    adl_rl = bench_reset_loop()
+    nbx_rl = bench_reset_loop()
     if docker_rl:
         print(f"  Docker:      {docker_rl['cycles_per_sec']:.1f} resets/s  (avg {docker_rl['avg_ms']:.0f}ms)")
     if os_rl:
@@ -877,18 +877,18 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
         print(f"  SWE-Mini:    {swe_rl['cycles_per_sec']:.1f} resets/s  (avg {swe_rl['avg_ms']:.0f}ms)")
     comparisons = []
     if docker_rl:
-        comparisons.append(f"{adl_rl['cycles_per_sec']/docker_rl['cycles_per_sec']:.1f}x vs Docker")
+        comparisons.append(f"{nbx_rl['cycles_per_sec']/docker_rl['cycles_per_sec']:.1f}x vs Docker")
     if os_rl:
-        comparisons.append(f"{adl_rl['cycles_per_sec']/os_rl['cycles_per_sec']:.1f}x vs OpenSandbox")
+        comparisons.append(f"{nbx_rl['cycles_per_sec']/os_rl['cycles_per_sec']:.1f}x vs OpenSandbox")
     if swe_rl:
-        comparisons.append(f"{adl_rl['cycles_per_sec']/swe_rl['cycles_per_sec']:.1f}x vs SWE-Mini")
-    print(f"  adl:         {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)"
+        comparisons.append(f"{nbx_rl['cycles_per_sec']/swe_rl['cycles_per_sec']:.1f}x vs SWE-Mini")
+    print(f"  nbx:         {nbx_rl['cycles_per_sec']:.1f} resets/s  (avg {nbx_rl['avg_ms']:.0f}ms)"
           + (f"  {', '.join(comparisons)}" if comparisons else ""))
 
     print("\nCheckpoint loop (50 run+restore cycles)...")
     cl = bench_checkpoint_loop()
     if cl:
-        print(f"  adl:    {cl['cycles_per_sec']:.1f} restores/s  (avg {cl['avg_ms']:.0f}ms)")
+        print(f"  nbx:    {cl['cycles_per_sec']:.1f} restores/s  (avg {cl['avg_ms']:.0f}ms)")
         print("  (Docker/Podman checkpoint requires experimental daemon — not benchmarked)")
     else:
         print("  Skipped (requires root + CRIU)")
@@ -899,13 +899,13 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
 
     print("\nConcurrent sandboxes (4/8/16 parallel, 10 cmds each)...")
     docker_conc = bench_docker_concurrent() if not skip_docker else None
-    adl_conc = bench_concurrent()
+    nbx_conc = bench_concurrent()
     for n in [4, 8, 16]:
-        a = adl_conc[n]
+        a = nbx_conc[n]
         parts = []
         if docker_conc:
             parts.append(f"Docker {docker_conc[n]['cmds_per_sec']:.0f}")
-        parts.append(f"adl {a['cmds_per_sec']:.0f} cmd/s")
+        parts.append(f"nbx {a['cmds_per_sec']:.0f} cmd/s")
         comparisons = []
         if docker_conc:
             comparisons.append(f"{a['cmds_per_sec']/docker_conc[n]['cmds_per_sec']:.1f}x vs Docker")
@@ -918,7 +918,7 @@ def main(skip_docker: bool = False, skip_podman: bool = False,
 def bench_port_map():
     """Compare sandbox creation with and without port_map."""
     import os
-    from agentdocker_lite import Sandbox, SandboxConfig
+    from nitrobox import Sandbox, SandboxConfig
 
     if os.geteuid() != 0:
         print("  Skipped (requires root)")
@@ -956,7 +956,7 @@ def bench_port_map():
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Benchmark agentdocker-lite vs Docker/Podman/OpenSandbox/SWE-MiniSandbox")
+    parser = argparse.ArgumentParser(description="Benchmark nitrobox vs Docker/Podman/OpenSandbox/SWE-MiniSandbox")
     parser.add_argument("--no-docker", action="store_true", help="Skip Docker benchmarks")
     parser.add_argument("--no-podman", action="store_true", help="Skip Podman benchmarks")
     parser.add_argument("--no-opensandbox", action="store_true", help="Skip OpenSandbox benchmarks")

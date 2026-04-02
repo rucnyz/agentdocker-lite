@@ -2,7 +2,7 @@
 
 ## Overview
 
-We built an integration to replace Harbor's `DockerEnvironment` with agentdocker-lite in the SkyRL RL training framework. The goal is to speed up rollout by eliminating Docker container overhead during training. This document summarizes the integration architecture, what was implemented, and the **unresolved Ray permission problem** that blocks end-to-end testing.
+We built an integration to replace Harbor's `DockerEnvironment` with nitrobox in the SkyRL RL training framework. The goal is to speed up rollout by eliminating Docker container overhead during training. This document summarizes the integration architecture, what was implemented, and the **unresolved Ray permission problem** that blocks end-to-end testing.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ SkyRL Training Loop (Ray-based)
     → harbor_agent_loop() per trajectory      # up to MAX_CONCURRENCY parallel
       → Trial(TrialConfig)
         → EnvironmentFactory.create_environment_from_config()
-          → BaseEnvironment.start()           # ← this is where Docker/agentdocker-lite lives
+          → BaseEnvironment.start()           # ← this is where Docker/nitrobox lives
         → Agent runs commands via env.exec()
         → Verifier runs tests via env.exec()
         → env.stop()
@@ -24,13 +24,13 @@ Harbor supports custom environment providers via `import_path` in config, which 
 
 ## What Was Implemented
 
-### 1. `AgentDockerLiteEnvironment` (Harbor provider)
+### 1. `NitroBoxLiteEnvironment` (Harbor provider)
 
-**File:** `SkyRL_docker_test/examples/train_integrations/harbor/agentdocker_lite_environment.py`
+**File:** `SkyRL_docker_test/examples/train_integrations/harbor/nitrobox_environment.py`
 
 Implements Harbor's `BaseEnvironment` interface:
 
-| Harbor method | agentdocker-lite mapping |
+| Harbor method | nitrobox mapping |
 |---|---|
 | `start(force_build)` | Build Dockerfile → export rootfs (cached by content hash) → `NamespaceSandbox(config)` |
 | `exec(cmd, cwd, env)` | `sb.run(cmd)` with cwd/env prepended via shell |
@@ -46,33 +46,33 @@ Key features:
 
 ### 2. Run Scripts
 
-- `run_harbor_gen_agentdocker.sh` — Generation-only test (10 samples, no training)
-- `run_codecontest_agentdocker.sh` — Full training run
+- `run_harbor_gen_nitrobox.sh` — Generation-only test (10 samples, no training)
+- `run_codecontest_nitrobox.sh` — Full training run
 
 Both are identical to the Docker baselines except for:
 ```bash
 harbor_trial_config.environment.type=null
-harbor_trial_config.environment.import_path=examples.train_integrations.harbor.agentdocker_lite_environment:AgentDockerLiteEnvironment
+harbor_trial_config.environment.import_path=examples.train_integrations.harbor.nitrobox_environment:NitroBoxLiteEnvironment
 ```
 
 ### 3. Dependency Configuration
 
-`agentdocker-lite` was added to SkyRL's `pyproject.toml` under the `harbor` optional dependency group:
+`nitrobox` was added to SkyRL's `pyproject.toml` under the `harbor` optional dependency group:
 ```toml
 harbor = [
     "harbor; python_version >= '3.12'",
-    "agentdocker-lite",
+    "nitrobox",
 ]
 
 [tool.uv.sources]
-agentdocker-lite = { path = "/scratch/jingyang/agentdocker-lite" }
+nitrobox = { path = "/scratch/jingyang/nitrobox" }
 ```
 
 ## The Ray Permission Problem
 
 ### Root Cause
 
-agentdocker-lite's `NamespaceSandbox` requires root privileges for:
+nitrobox's `NamespaceSandbox` requires root privileges for:
 - `unshare --pid --mount --fork` (Linux namespace creation)
 - `mount -t overlay` (overlayfs for copy-on-write filesystem)
 - `mount --bind` (volume mounts)
@@ -88,12 +88,12 @@ The `Sandbox()` factory function checks `os.geteuid() == 0`:
 SkyRL runs on Ray. The execution flow is:
 
 ```
-User runs: sudo bash run_harbor_gen_agentdocker.sh     ← root
+User runs: sudo bash run_harbor_gen_nitrobox.sh     ← root
   → sudo uv run ... main_harbor_generate               ← root
     → ray.get(skyrl_entrypoint.remote(cfg))             ← submits task to Ray
       → Ray worker picks up the task                    ← jingyang (NOT root)
         → HarborGenerator.harbor_agent_loop()           ← jingyang
-          → AgentDockerLiteEnvironment.start()           ← jingyang
+          → NitroBoxLiteEnvironment.start()           ← jingyang
             → Sandbox() → os.geteuid() != 0             ← FAILS
               → LandlockSandbox → mkdir('/app')          ← PermissionError
 ```
@@ -127,7 +127,7 @@ Add a `use_sudo=True` option to `SandboxConfig` that prepends `sudo` to privileg
 2. Safety guards on `sudo rm -rf` (whitelist allowed path prefixes)
 3. Changes to `NamespaceSandbox`, `_PersistentShell`, and cgroup management code
 
-A partial implementation was done and reverted. The main concern was `sudo rm -rf` in `delete()` and `_reset_overlayfs()`. A safe version would restrict deletion to paths under a dedicated prefix (e.g., `/var/lib/agentdocker_lite/`) rather than `/tmp/`.
+A partial implementation was done and reverted. The main concern was `sudo rm -rf` in `delete()` and `_reset_overlayfs()`. A safe version would restrict deletion to paths under a dedicated prefix (e.g., `/var/lib/nitrobox/`) rather than `/tmp/`.
 
 #### Option C: Linux capabilities instead of full root
 Grant the Ray worker process specific capabilities instead of full root:
@@ -144,10 +144,10 @@ Use `unshare --user --map-root-user` to create unprivileged user namespaces. Thi
 
 ## Standalone Benchmark (Working)
 
-A Docker comparison benchmark was added to `tests/test_sandbox.py::TestDockerComparison`. This runs without Ray and directly compares agentdocker-lite vs Docker:
+A Docker comparison benchmark was added to `tests/test_sandbox.py::TestDockerComparison`. This runs without Ray and directly compares nitrobox vs Docker:
 
 ```bash
-cd /scratch/jingyang/agentdocker-lite
+cd /scratch/jingyang/nitrobox
 sudo python -m pytest tests/test_sandbox.py::TestDockerComparison -v -s
 ```
 
@@ -157,8 +157,8 @@ This test matches Harbor's Docker flow: `docker build` → `docker run -d` → `
 
 | File | Location | Purpose |
 |---|---|---|
-| `agentdocker_lite_environment.py` | `SkyRL_docker_test/examples/train_integrations/harbor/` | Harbor BaseEnvironment provider |
-| `run_harbor_gen_agentdocker.sh` | same directory | Generation-only test script |
-| `run_codecontest_agentdocker.sh` | same directory | Full training test script |
-| `AGENTDOCKER_INTEGRATION.md` | same directory | Quick-reference doc |
-| `TestDockerComparison` | `agentdocker-lite/tests/test_sandbox.py` | A/B benchmark test |
+| `nitrobox_environment.py` | `SkyRL_docker_test/examples/train_integrations/harbor/` | Harbor BaseEnvironment provider |
+| `run_harbor_gen_nitrobox.sh` | same directory | Generation-only test script |
+| `run_codecontest_nitrobox.sh` | same directory | Full training test script |
+| `NITROBOX_INTEGRATION.md` | same directory | Quick-reference doc |
+| `TestDockerComparison` | `nitrobox/tests/test_sandbox.py` | A/B benchmark test |

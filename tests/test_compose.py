@@ -5,17 +5,21 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+import threading
+import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from agentdocker_lite.compose import (
+from nitrobox.compose import (
     ComposeProject,
     _Service,
     _parse_compose,
     _substitute,
     _topo_sort,
 )
+from nitrobox.compose._project import _HealthMonitor
 
 
 # ------------------------------------------------------------------ #
@@ -110,7 +114,7 @@ class TestParseCompose:
                 image: redis:alpine
         """))
         services, _ = _parse_compose(compose, {})
-        assert services["app"].depends_on == ["db", "redis"]
+        assert services["app"].depends_on == {"db": "service_started", "redis": "service_started"}
 
     def test_depends_on_dict(self, tmp_path):
         compose = tmp_path / "docker-compose.yml"
@@ -389,11 +393,193 @@ class TestParseCompose:
         assert us.build is not None
         assert us.dns == ["8.8.8.8"]
         assert "seccomp:unconfined" in us.security_opt
-        assert us.depends_on == ["mailpit"]
+        assert us.depends_on == {"mailpit": "service_started"}
         assert us.healthcheck is not None
         assert "gmail_data:/app/data" in us.volumes
         assert us.environment["MAILPIT_BASE_URL"] == "http://127.0.0.1:9025"
         assert us.environment["AUTH_PORT"] == "8030"  # default
+
+
+# ------------------------------------------------------------------ #
+#  New compose fields                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestNewComposeFields:
+    """Parser tests for extra_hosts, sysctls, init, user, pid, ipc."""
+
+    def test_extra_hosts(self, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                extra_hosts:
+                  - "myhost:10.0.0.1"
+                  - "other:192.168.1.1"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].extra_hosts == ["myhost:10.0.0.1", "other:192.168.1.1"]
+
+    def test_sysctls_dict(self, tmp_path):
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                sysctls:
+                  net.ipv4.ip_forward: "1"
+                  net.core.somaxconn: "1024"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].sysctls == {
+            "net.ipv4.ip_forward": "1",
+            "net.core.somaxconn": "1024",
+        }
+
+    def test_init_no_error(self, tmp_path):
+        """init: true should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                init: true
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+    def test_user_no_error(self, tmp_path):
+        """user field should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                user: "1000:1000"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+    def test_pid_no_error(self, tmp_path):
+        """pid field should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                pid: "host"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+    def test_ipc_no_error(self, tmp_path):
+        """ipc field should not raise ValueError."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                ipc: "host"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "app" in services
+
+
+    def test_security_opt_whitespace(self, tmp_path):
+        """security_opt with space after colon is still recognized."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                security_opt:
+                  - "seccomp: unconfined"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "seccomp: unconfined" in services["app"].security_opt
+
+    def test_env_file_single(self, tmp_path):
+        """env_file loads variables from file."""
+        env_file = tmp_path / "test.env"
+        env_file.write_text("DB_HOST=localhost\nDB_PORT=5432\n# comment\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent(f"""\
+            services:
+              db:
+                image: postgres
+                env_file:
+                  - test.env
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["db"].environment["DB_HOST"] == "localhost"
+        assert services["db"].environment["DB_PORT"] == "5432"
+
+    def test_env_file_override(self, tmp_path):
+        """environment: overrides env_file values."""
+        env_file = tmp_path / "base.env"
+        env_file.write_text("KEY=from_file\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                env_file:
+                  - base.env
+                environment:
+                  KEY: from_inline
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].environment["KEY"] == "from_inline"
+
+    def test_env_file_quoted_values(self, tmp_path):
+        """env_file strips quotes around values."""
+        env_file = tmp_path / "quoted.env"
+        env_file.write_text('SINGLE=\'single\'\nDOUBLE="double"\n')
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                env_file:
+                  - quoted.env
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].environment["SINGLE"] == "single"
+        assert services["app"].environment["DOUBLE"] == "double"
+
+    def test_volume_single_path(self, tmp_path):
+        """Single-path volume `/data` is treated as `/data:/data`."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                volumes:
+                  - /data
+                  - /var/log:/var/log
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "/data" in services["app"].volumes
+        assert "/var/log:/var/log" in services["app"].volumes
+
+    def test_tmpfs_string_and_list(self, tmp_path):
+        """tmpfs as string and as list both work."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              str_form:
+                image: myapp
+                tmpfs: /run
+              list_form:
+                image: myapp
+                tmpfs:
+                  - /run
+                  - /tmp
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["str_form"].tmpfs == ["/run"]
+        assert services["list_form"].tmpfs == ["/run", "/tmp"]
 
 
 # ------------------------------------------------------------------ #
@@ -504,9 +690,16 @@ class TestComplexCompose:
 
     def test_depends_on_condition(self, compose_file):
         services, _ = _parse_compose(compose_file, {})
-        assert "db" in services["api"].depends_on
-        assert "mail" in services["api"].depends_on
-        assert services["frontend"].depends_on == ["mail", "api"]
+        # api depends on db (service_healthy) and mail (service_started)
+        assert services["api"].depends_on == {
+            "db": "service_healthy",
+            "mail": "service_started",
+        }
+        # frontend uses list syntax → all default to service_started
+        assert services["frontend"].depends_on == {
+            "mail": "service_started",
+            "api": "service_started",
+        }
 
     def test_healthcheck_formats(self, compose_file):
         services, _ = _parse_compose(compose_file, {})
@@ -1172,3 +1365,455 @@ class TestComposeProject:
             assert count == 1, f"expected exactly 1 run, got {count}"
         finally:
             proj.down()
+
+    def test_healthcheck_waits(self, tmp_path, shared_cache_dir):
+        """Service with healthcheck should block up() until healthy."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        # Service that takes ~2s to become "healthy" (touch a file after delay)
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 1 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hc-wait",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            t0 = time.monotonic()
+            proj.up(timeout=30)
+            elapsed = time.monotonic() - t0
+            # Should NOT have waited the full start_period (15s).
+            # Service becomes ready after ~1s, start_interval is 1s,
+            # so health check passes within ~2-3s.  Sandbox creation
+            # adds ~2-3s.  Total should be well under 15s.
+            assert elapsed < 10.0, f"up() took {elapsed:.1f}s, should be <10s"
+            # Verify the service is actually healthy
+            _, ec = proj.services["app"].run("test -f /tmp/ready")
+            assert ec == 0
+        finally:
+            proj.down()
+
+
+# ------------------------------------------------------------------ #
+#  Integration tests for extra_hosts and sysctls                       #
+# ------------------------------------------------------------------ #
+
+
+class TestDetachMode:
+    """Tests for up(detach=True) and health_status()/wait_healthy()."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+    def test_detach_returns_immediately(self, tmp_path, shared_cache_dir):
+        """up(detach=True) should return before health check passes."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 3 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-detach",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            t0 = time.monotonic()
+            proj.up(detach=True)
+            elapsed = time.monotonic() - t0
+            # Should return in <2s (sandbox creation only, no health wait)
+            assert elapsed < 3.0, f"detach took {elapsed:.1f}s, should be <3s"
+            # health_status should show "starting" (not yet healthy)
+            status = proj.health_status()
+            assert "app" in status
+            assert status["app"] in ("starting", "healthy")  # might be healthy already
+        finally:
+            proj.down()
+
+    def test_health_status_transitions(self, tmp_path, shared_cache_dir):
+        """health_status() should reflect monitor state changes."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 1 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+              worker:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-status",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up(detach=True)
+            # worker has no healthcheck → "none"
+            assert proj.health_status()["worker"] == "none"
+            # Wait for app to become healthy
+            proj.wait_healthy(timeout=15)
+            assert proj.health_status()["app"] == "healthy"
+        finally:
+            proj.down()
+
+    def test_wait_healthy_after_detach(self, tmp_path, shared_cache_dir):
+        """wait_healthy() should block until all checks pass."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 1 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-wait-after-detach",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up(detach=True)
+            proj.wait_healthy(timeout=15)
+            # After wait_healthy, service should be healthy
+            _, ec = proj.services["app"].run("test -f /tmp/ready")
+            assert ec == 0
+        finally:
+            proj.down()
+
+
+class TestExtraHostsAndSysctls:
+    """Integration tests for extra_hosts and sysctls compose fields."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+    def test_extra_hosts_in_etc_hosts(self, tmp_path, shared_cache_dir):
+        """extra_hosts entries should appear in /etc/hosts."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                extra_hosts:
+                  - "myapi:10.0.0.99"
+                  - "dbhost:192.168.1.50"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-extra-hosts",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            output, ec = proj.services["app"].run("cat /etc/hosts")
+            assert ec == 0
+            assert "10.0.0.99" in output and "myapi" in output
+            assert "192.168.1.50" in output and "dbhost" in output
+            # getent should resolve them
+            output2, ec2 = proj.services["app"].run("getent hosts myapi")
+            assert ec2 == 0
+            assert "10.0.0.99" in output2
+        finally:
+            proj.down()
+
+    def test_extra_hosts_survive_reset(self, tmp_path, shared_cache_dir):
+        """extra_hosts should persist after reset()."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                extra_hosts:
+                  - "custom:10.10.10.10"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-extra-hosts-reset",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            proj.reset()
+            output, ec = proj.services["app"].run("getent hosts custom")
+            assert ec == 0, f"extra_hosts lost after reset: {output}"
+            assert "10.10.10.10" in output
+        finally:
+            proj.down()
+
+    def test_sysctls_does_not_crash(self, tmp_path, shared_cache_dir):
+        """Compose file with sysctls should not crash up().
+
+        Actual sysctl writability depends on kernel namespace support
+        and /proc mount options.  This test verifies the mechanism
+        runs without error and the service starts successfully.
+        """
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                sysctls:
+                  net.ipv4.ip_forward: "1"
+                  kernel.hostname: "sysctl-test"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-sysctls",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            # Service should start successfully regardless of sysctl writability
+            output, ec = proj.services["app"].run("echo ok")
+            assert ec == 0
+            assert "ok" in output
+        finally:
+            proj.down()
+
+
+# ------------------------------------------------------------------ #
+#  _HealthMonitor unit tests (mock-based, no sandbox needed)           #
+# ------------------------------------------------------------------ #
+
+
+class TestHealthMonitor:
+    """Unit tests for _HealthMonitor using a mock sandbox."""
+
+    @staticmethod
+    def _mock_sb(results: list[tuple[str, int]]):
+        """Create a mock sandbox that returns results in order."""
+        sb = MagicMock()
+        call_count = 0
+
+        def run_side_effect(cmd, timeout=None):
+            nonlocal call_count
+            if call_count < len(results):
+                result = results[call_count]
+                call_count += 1
+                return result
+            return ("", 0)
+
+        sb.run = MagicMock(side_effect=run_side_effect)
+        return sb
+
+    def test_immediate_healthy(self):
+        """Monitor sets status to healthy on first successful check."""
+        sb = self._mock_sb([("", 0)])
+        mon = _HealthMonitor(sb, "true", interval=10, timeout=5)
+        time.sleep(0.5)
+        assert mon.status == "healthy"
+        mon.stop()
+
+    def test_healthy_after_failures(self):
+        """Monitor becomes healthy after initial failures."""
+        sb = self._mock_sb([("", 1), ("", 1), ("", 0)])
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=10, start_interval=0.1,
+        )
+        time.sleep(1.0)
+        assert mon.status == "healthy"
+        mon.stop()
+
+    def test_unhealthy_after_retries(self):
+        """Monitor marks unhealthy after retries consecutive failures."""
+        sb = self._mock_sb([("", 1)] * 20)
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=0, retries=3,
+        )
+        time.sleep(1.0)
+        assert mon.status == "unhealthy"
+        mon.stop()
+
+    def test_start_period_suppresses_unhealthy(self):
+        """Failures during start_period don't mark unhealthy."""
+        sb = self._mock_sb([("", 1)] * 50)
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=2.0, retries=3,
+        )
+        # During start_period, should stay "starting" not "unhealthy"
+        time.sleep(0.5)
+        assert mon.status == "starting"
+        mon.stop()
+
+    def test_stop_terminates_thread(self):
+        """stop() should terminate the background thread promptly."""
+        sb = self._mock_sb([("", 1)] * 100)
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5, start_period=100,
+        )
+        mon.stop()
+        assert not mon._thread.is_alive()
+
+    def test_start_interval_used_during_start_period(self):
+        """During start_period, checks use start_interval, not interval."""
+        sb = self._mock_sb([("", 1)] * 100)
+        mon = _HealthMonitor(
+            sb, "check",
+            interval=60.0,          # very long — would timeout test if used
+            start_interval=0.1,     # fast — allows multiple checks
+            start_period=5.0,
+            timeout=5, retries=3,
+        )
+        time.sleep(1.0)
+        # Should have made several calls (using start_interval=0.1s)
+        call_count = sb.run.call_count
+        assert call_count >= 3, f"expected >=3 calls, got {call_count}"
+        mon.stop()
+
+    def test_healthy_resets_failure_count(self):
+        """A successful check resets consecutive failure counter."""
+        # Fail twice, succeed once, fail twice more → should NOT be unhealthy
+        # because the success reset the counter
+        sb = self._mock_sb([("", 1), ("", 1), ("", 0), ("", 1), ("", 1)])
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=0, retries=3,
+        )
+        time.sleep(1.5)
+        # Should be healthy (the success in the middle reset the counter)
+        assert mon.status == "healthy"
+        mon.stop()
+
+    def test_exception_counts_as_failure(self):
+        """If sb.run() raises, it should count as a failed check."""
+        sb = MagicMock()
+        sb.run = MagicMock(side_effect=RuntimeError("connection lost"))
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=0, retries=3,
+        )
+        time.sleep(1.0)
+        assert mon.status == "unhealthy"
+        mon.stop()
+
+    def test_unhealthy_breaks_wait(self, tmp_path, shared_cache_dir):
+        """_wait_healthy should return early when monitor reports unhealthy."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                healthcheck:
+                  test: ["CMD-SHELL", "false"]
+                  interval: 0.5s
+                  timeout: 1s
+                  retries: 2
+                  start_period: 0s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hc-unhealthy",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        # up() should raise because health check always fails
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match="Health check failed"):
+            proj.up(timeout=30)
+        elapsed = time.monotonic() - t0
+        # Should fail fast (retries=2, interval=0.5s) — well before the
+        # 30s timeout.  Allow some headroom for sandbox creation.
+        assert elapsed < 15.0, f"took {elapsed:.1f}s, should fail fast"
+
+    def test_timeout_raises(self, tmp_path, shared_cache_dir):
+        """_wait_healthy should raise RuntimeError on timeout."""
+        compose = tmp_path / "docker-compose.yml"
+        # Health check that always fails (file never exists)
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /nonexistent"]
+                  interval: 30s
+                  timeout: 1s
+                  retries: 100
+                  start_period: 30s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hc-timeout",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        # Short timeout — should hit deadline before retries exhaust
+        with pytest.raises(RuntimeError, match="Health check"):
+            proj.up(timeout=5)

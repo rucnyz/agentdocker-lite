@@ -1,4 +1,4 @@
-"""Tests for agentdocker-lite.
+"""Tests for nitrobox.
 
 These tests require root and Docker (for auto rootfs preparation).
 Run with: sudo python -m pytest tests/ -v
@@ -9,12 +9,13 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import urllib.error
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 # Use a pre-existing rootfs if available, otherwise fall back to Docker image.
 # Set LITE_SANDBOX_TEST_IMAGE env var to override.
@@ -514,7 +515,7 @@ class TestFsSnapshot:
 class TestSaveAsImage:
     """Test save_as_image: export sandbox state as a Docker image."""
 
-    IMAGE_TAG = "adl-test-save:cached"
+    IMAGE_TAG = "nbx-test-save:cached"
 
     def test_save_and_load(self, sandbox):
         sandbox.run("echo cached_data > /workspace/cached.txt")
@@ -849,7 +850,8 @@ class TestEdgeCases:
         sb = Sandbox(config, name="dead-sandbox")
         sb.delete()
         # rootfs is gone, so run() should raise (shell can't restart)
-        with pytest.raises((RuntimeError, OSError)):
+        from nitrobox._errors import SandboxError
+        with pytest.raises((RuntimeError, OSError, SandboxError)):
             sb.run("echo hello")
 
     def test_concurrent_commands_on_same_sandbox(self, sandbox):
@@ -883,7 +885,7 @@ class TestMountOverlay:
     def test_single_layer(self, tmp_path):
         """mount_overlay works with a single lowerdir."""
         _requires_root()
-        from agentdocker_lite._mount import mount_overlay
+        from nitrobox._core import py_mount_overlay as mount_overlay
 
         lower = tmp_path / "lower"
         lower.mkdir()
@@ -902,7 +904,7 @@ class TestMountOverlay:
     def test_multi_layer(self, tmp_path):
         """mount_overlay works with multiple lowerdirs (bypasses 256-byte limit)."""
         _requires_root()
-        from agentdocker_lite._mount import mount_overlay
+        from nitrobox._core import py_mount_overlay as mount_overlay
 
         # Create 6 layers — this exceeds the 256-byte fsconfig limit
         layers = []
@@ -933,7 +935,7 @@ class TestMountOverlay:
     def test_new_api_detection(self):
         """_check_new_mount_api returns a boolean (True on kernel >= 6.8)."""
         _requires_root()
-        from agentdocker_lite._mount import _check_new_mount_api
+        from nitrobox._core import py_check_new_mount_api as _check_new_mount_api
 
         result = _check_new_mount_api()
         assert isinstance(result, bool)
@@ -1016,6 +1018,143 @@ class TestPortMap:
             assert "200" in output
         finally:
             sb.delete()
+
+    def test_delete_cleans_netns_rootful(self, tmp_path, shared_cache_dir):
+        """delete() with port_map leaves no stale netns bind mounts (rootful)."""
+        _requires_root()
+        _requires_tun()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            net_isolate=True,
+            port_map=["19878:8000"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="netns-cleanup")
+        env_dir = sb._env_dir
+        sb.delete()
+
+        # env_dir should be gone
+        assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
+        # No /run/netns bind mount left
+        import subprocess
+        mounts = subprocess.run(["mount"], capture_output=True, text=True).stdout
+        assert "netns-cleanup" not in mounts, f"stale netns mount: {[l for l in mounts.splitlines() if 'netns-cleanup' in l]}"
+
+    def test_delete_cleans_netns_userns(self, tmp_path, shared_cache_dir):
+        """delete() with port_map leaves no stale .netns bind mounts (userns)."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            net_isolate=True,
+            port_map=["19878:8000"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="netns-cleanup-u")
+        env_dir = sb._env_dir
+        sb.delete()
+
+        # env_dir should be gone (no stuck .netns bind mount)
+        assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
+
+
+# ------------------------------------------------------------------ #
+#  Cleanup verification                                                 #
+# ------------------------------------------------------------------ #
+
+
+class TestCleanupVerification:
+    """Verify that delete() and reset() leave no resource leaks."""
+
+    def test_delete_removes_all_files(self, tmp_path, shared_cache_dir):
+        """delete() removes the entire env_dir, no leftovers."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="clean-test")
+        # Create some files inside sandbox
+        sb.run("echo test > /workspace/file.txt")
+        sb.run("mkdir -p /workspace/subdir && echo nested > /workspace/subdir/a.txt")
+        env_dir = sb._env_dir
+        sb.delete()
+
+        assert not env_dir.exists(), \
+            f"env_dir still exists after delete: {list(env_dir.rglob('*')) if env_dir.exists() else []}"
+
+    def test_delete_kills_shell_process(self, tmp_path, shared_cache_dir):
+        """delete() kills the persistent shell process — no zombies."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="proc-clean")
+        shell_pid = sb._persistent_shell.pid
+        assert shell_pid is not None
+
+        sb.delete()
+
+        # Process should be dead
+        import signal
+        with pytest.raises(ProcessLookupError):
+            os.kill(shell_pid, signal.SIG_DFL)
+
+    def test_reset_no_mount_leak(self, tmp_path, shared_cache_dir):
+        """Multiple resets don't accumulate bind mounts."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="mount-leak")
+        try:
+            import subprocess
+            before = subprocess.run(["mount"], capture_output=True, text=True).stdout.count("mount-leak")
+            for _ in range(5):
+                sb.reset()
+            after = subprocess.run(["mount"], capture_output=True, text=True).stdout.count("mount-leak")
+            # Mount count should not grow with resets
+            assert after <= before + 2, \
+                f"Mount leak: {before} mounts before, {after} after 5 resets"
+        finally:
+            sb.delete()
+
+    def test_delete_no_stale_cgroup(self, tmp_path, shared_cache_dir):
+        """delete() removes the cgroup directory."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            memory_max="256m",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="cg-clean")
+        cgroup_path = sb._cgroup_path
+        sb.delete()
+
+        if cgroup_path:
+            assert not cgroup_path.exists(), f"cgroup not cleaned: {cgroup_path}"
 
 
 # ------------------------------------------------------------------ #
@@ -1260,23 +1399,23 @@ class TestParseCpuMax:
     """Unit tests for _parse_cpu_max sugar."""
 
     def test_fraction(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("0.5") == "50000 100000"
 
     def test_integer_cores(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("2") == "200000 100000"
 
     def test_percentage(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("50%") == "50000 100000"
 
     def test_passthrough_raw(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("50000 100000") == "50000 100000"
 
     def test_small_fraction(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         result = _parse_cpu_max("0.01")
         quota, period = result.split()
         assert int(quota) >= 1
@@ -1292,24 +1431,24 @@ class TestParseIoMax:
     """Unit tests for _parse_io_max sugar."""
 
     def test_bare_size(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from nitrobox.config import _parse_io_max
         # /dev/xxx won't resolve on CI, but MAJ:MIN passthrough works
         result = _parse_io_max("259:0 10mb")
         assert result == "259:0 wbps=10485760"
 
     def test_keyed_size(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from nitrobox.config import _parse_io_max
         result = _parse_io_max("259:0 wbps=10mb")
         assert result == "259:0 wbps=10485760"
 
     def test_multiple_params(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from nitrobox.config import _parse_io_max
         result = _parse_io_max("259:0 rbps=5mb wbps=10mb")
         assert "rbps=5242880" in result
         assert "wbps=10485760" in result
 
     def test_passthrough_raw(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from nitrobox.config import _parse_io_max
         raw = "259:0 wbps=10485760"
         assert _parse_io_max(raw) == raw
 
@@ -1323,16 +1462,16 @@ class TestCpuShares:
     """Unit tests for _convert_cpu_shares."""
 
     def test_default_1024(self):
-        from agentdocker_lite.backends.base import _convert_cpu_shares
+        from nitrobox.config import _convert_cpu_shares
         # Docker 1024 → cgroup v2 weight ~39 (formula: 1 + (1022*9999)/262142)
         assert 1 <= _convert_cpu_shares(1024) <= 10000
 
     def test_minimum(self):
-        from agentdocker_lite.backends.base import _convert_cpu_shares
+        from nitrobox.config import _convert_cpu_shares
         assert _convert_cpu_shares(2) >= 1
 
     def test_maximum(self):
-        from agentdocker_lite.backends.base import _convert_cpu_shares
+        from nitrobox.config import _convert_cpu_shares
         assert _convert_cpu_shares(262144) == 10000
 
     def test_from_docker(self):
@@ -1464,9 +1603,9 @@ class TestApplyImageDefaults:
     """Unit tests for _apply_image_defaults (image config backfill)."""
 
     def test_backfill_workdir(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: {"working_dir": "/app", "env": {}, "cmd": None,
                           "entrypoint": None, "exposed_ports": []},
         )
@@ -1475,9 +1614,9 @@ class TestApplyImageDefaults:
         assert cfg.working_dir == "/app"
 
     def test_user_workdir_wins(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: {"working_dir": "/app", "env": {}, "cmd": None,
                           "entrypoint": None, "exposed_ports": []},
         )
@@ -1486,9 +1625,9 @@ class TestApplyImageDefaults:
         assert cfg.working_dir == "/custom"
 
     def test_backfill_env(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: {"working_dir": None, "env": {"A": "1", "B": "2"},
                           "cmd": None, "entrypoint": None, "exposed_ports": []},
         )
@@ -1498,9 +1637,9 @@ class TestApplyImageDefaults:
         assert cfg.environment["B"] == "override"
 
     def test_no_image_config(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: None,
         )
         cfg = SandboxConfig(image="myimg")
@@ -1509,7 +1648,7 @@ class TestApplyImageDefaults:
         assert cfg.environment == {}
 
     def test_no_image(self):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         cfg = SandboxConfig()
         _apply_image_defaults(cfg)
         assert cfg.working_dir == "/"
@@ -1718,7 +1857,7 @@ class TestGetImageConfig:
     def test_basic(self):
         """get_image_config returns cmd, entrypoint, env, working_dir."""
         _requires_docker()
-        from agentdocker_lite import get_image_config
+        from nitrobox import get_image_config
         cfg = get_image_config("python:3.11-slim")
         assert cfg is not None
         assert cfg["cmd"] == ["python3"]
@@ -1727,7 +1866,7 @@ class TestGetImageConfig:
 
     def test_nonexistent_image(self):
         """get_image_config returns None for missing image."""
-        from agentdocker_lite import get_image_config
+        from nitrobox import get_image_config
         assert get_image_config("nonexistent:image-xyz") is None
 
 
@@ -1761,10 +1900,20 @@ class TestDeleteCleansBackground:
 # ------------------------------------------------------------------ #
 
 
+def _skip_if_no_registry():
+    """Skip test at runtime if Docker Hub API is unreachable or rate-limited."""
+    from nitrobox._registry import get_diff_ids_from_registry
+    try:
+        if get_diff_ids_from_registry("alpine:3.19") is None:
+            pytest.skip("Docker Hub unreachable or rate-limited")
+    except (OSError, urllib.error.URLError, RuntimeError):
+        pytest.skip("Docker Hub unreachable or rate-limited")
+
+
 class TestRegistry:
     def test_parse_image_ref(self):
         """parse_image_ref correctly splits registry/repo/tag."""
-        from agentdocker_lite._registry import parse_image_ref
+        from nitrobox._registry import parse_image_ref
 
         assert parse_image_ref("ubuntu:22.04") == (
             "registry-1.docker.io", "library/ubuntu", "22.04")
@@ -1777,24 +1926,29 @@ class TestRegistry:
 
     def test_get_diff_ids_from_registry(self):
         """Can get layer diff_ids directly from Docker Hub."""
-        from agentdocker_lite._registry import get_diff_ids_from_registry
+        _skip_if_no_registry()
+        from nitrobox._registry import get_diff_ids_from_registry
 
         ids = get_diff_ids_from_registry("ubuntu:22.04")
-        assert ids is not None
+        if ids is None:
+            pytest.skip("Docker Hub rate-limited for ubuntu:22.04")
         assert len(ids) >= 1
         assert all(d.startswith("sha256:") for d in ids)
 
     def test_get_config_from_registry(self):
         """Can get image config directly from Docker Hub."""
-        from agentdocker_lite._registry import get_config_from_registry
+        _skip_if_no_registry()
+        from nitrobox._registry import get_config_from_registry
 
         cfg = get_config_from_registry("python:3.11-slim")
-        assert cfg is not None
+        if cfg is None:
+            pytest.skip("Docker Hub rate-limited for python:3.11-slim")
         assert cfg["cmd"] == ["python3"]
 
     def test_registry_fallback_layers(self, tmp_path):
         """Layer extraction works via registry when Docker/Podman unavailable."""
-        import agentdocker_lite.rootfs as rf
+        _skip_if_no_registry()
+        import nitrobox.rootfs as rf
 
         orig = rf._container_cli
         rf._container_cli = lambda: None  # Force registry path
@@ -1942,4 +2096,111 @@ class TestAsyncAPI:
             await asyncio.gather(*(worker(i) for i in range(4)))
 
         asyncio.run(main())
+
+
+class TestVmMode:
+    """Tests for vm_mode=True sandbox init."""
+
+    def test_sys_mounted(self, tmp_path, shared_cache_dir):
+        """vm_mode sandbox has /sys mounted with contents."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-sys")
+        try:
+            out, ec = sb.run("ls /sys/kernel 2>&1")
+            assert ec == 0
+            assert out.strip(), "/sys/kernel should have contents"
+        finally:
+            sb.delete()
+
+    def test_tmp_writable(self, tmp_path, shared_cache_dir):
+        """vm_mode /tmp is writable (stays on overlayfs to preserve image files)."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-tmp")
+        try:
+            out, ec = sb.run("touch /tmp/test_file && echo ok")
+            assert ec == 0
+            assert "ok" in out
+        finally:
+            sb.delete()
+
+    def test_run_is_tmpfs(self, tmp_path, shared_cache_dir):
+        """vm_mode mounts tmpfs at /run."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-run")
+        try:
+            out, ec = sb.run("stat -f -c %T /run 2>/dev/null || stat -f /run 2>/dev/null")
+            assert ec == 0
+            assert "tmpfs" in out.lower(), f"/run should be tmpfs, got: {out}"
+        finally:
+            sb.delete()
+
+    def test_mktemp_works(self, tmp_path, shared_cache_dir):
+        """vm_mode sandbox can create temp files (no overlayfs inode overflow)."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-mktemp")
+        try:
+            out, ec = sb.run("mktemp")
+            assert ec == 0
+            assert "/tmp/" in out
+        finally:
+            sb.delete()
+
+    def test_volumes_on_top_of_tmpfs(self, tmp_path, shared_cache_dir):
+        """Directory volume bind-mounts work on top of tmpfs /run."""
+        host_dir = tmp_path / "scripts"
+        host_dir.mkdir()
+        (host_dir / "test.sh").write_text("#!/bin/sh\necho hello\n")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            volumes=[f"{host_dir}:/run/scripts:ro"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-vol-run")
+        try:
+            out, ec = sb.run("cat /run/scripts/test.sh")
+            assert ec == 0
+            assert "echo hello" in out
+        finally:
+            sb.delete()
+
+    def test_proc_sys_not_readonly(self, tmp_path, shared_cache_dir):
+        """vm_mode does not make /proc/sys read-only."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-procsys")
+        try:
+            # In vm_mode, /proc/sys should NOT have a read-only bind mount
+            out, ec = sb.run("mount 2>/dev/null | grep 'proc/sys.*\\bro\\b' | wc -l")
+            assert ec == 0
+            count = int(out.strip())
+            assert count == 0, f"/proc/sys should not be read-only in vm_mode, found {count} ro mounts"
+        finally:
+            sb.delete()
 

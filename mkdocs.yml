@@ -1,8 +1,8 @@
-site_name: agentdocker-lite
+site_name: nitrobox
 site_description: Lightweight Linux namespace sandbox with persistent shell and instant reset
-site_url: https://opensage-agent.github.io/agentdocker-lite/
-repo_url: https://github.com/opensage-agent/agentdocker-lite
-repo_name: opensage-agent/agentdocker-lite
+site_url: https://opensage-agent.github.io/nitrobox/
+repo_url: https://github.com/opensage-agent/nitrobox
+repo_name: opensage-agent/nitrobox
 
 theme:
   name: material

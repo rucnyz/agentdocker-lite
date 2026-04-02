@@ -7,5 +7,9 @@ build/
 .venv/
 .idea/
 dev/
+scripts/vm/
 site/
 uv.lock
+target/
+*.so
+.envrc

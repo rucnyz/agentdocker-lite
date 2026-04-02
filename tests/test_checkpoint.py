@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -108,16 +108,33 @@ class TestCheckpointSaveRestore:
             assert f"cmd_{i}" in out
 
     def test_leave_running(self, sandbox, ckpt_path):
-        """Sandbox keeps running after save with leave_running=True."""
+        """Sandbox keeps running after save with leave_running=True.
+
+        Verifies the shell process is truly the SAME process (not
+        restarted) by checking the persistent shell PID before and after.
+        """
         sandbox.run("echo before > /workspace/test.txt")
+        pid_before = sandbox._persistent_shell.pid
         mgr = CheckpointManager(sandbox)
         mgr.save(ckpt_path, leave_running=True)
 
-        # Sandbox should still work
+        # Shell should be the SAME process (not restarted).
+        pid_after = sandbox._persistent_shell.pid
+        assert pid_before == pid_after, (
+            f"Shell PID changed after save: {pid_before} -> {pid_after}"
+        )
+
+        # Commands should still work.
+        out, ec = sandbox.run("echo alive")
+        assert ec == 0
+        assert "alive" in out
+
+        # File state should be preserved.
         out, ec = sandbox.run("cat /workspace/test.txt")
         assert ec == 0
         assert "before" in out
 
+        # Shell should still accept new commands.
         sandbox.run("echo after > /workspace/test.txt")
         out, _ = sandbox.run("cat /workspace/test.txt")
         assert "after" in out

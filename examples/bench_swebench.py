@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark: SWE-bench-style evaluation loop — Docker vs agentdocker-lite.
+"""Benchmark: SWE-bench-style evaluation loop — Docker vs nitrobox.
 
 Simulates the SWE-bench harness flow:
   create container → apply patch → run tests → reset/destroy → repeat
@@ -7,14 +7,14 @@ Simulates the SWE-bench harness flow:
 Usage:
     python examples/bench_swebench.py
     python examples/bench_swebench.py --episodes 50
-    python examples/bench_swebench.py --no-docker   # skip Docker (adl only)
+    python examples/bench_swebench.py --no-docker   # skip Docker (nitrobox only)
 """
 
 import subprocess
 import time
 
 IMAGE = "ubuntu:22.04"
-CONTAINER_NAME = "adl-bench-swebench"
+CONTAINER_NAME = "nbx-bench-swebench"
 N_CMDS_PER_EPISODE = 5  # simulate: apply patch, run tests, collect results
 
 
@@ -67,11 +67,11 @@ def bench_docker_swebench(n_episodes: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# agentdocker-lite — same flow but with instant reset
+# nitrobox — same flow but with instant reset
 # ---------------------------------------------------------------------------
 
-def bench_adl_swebench(n_episodes: int) -> dict:
-    from agentdocker_lite import Sandbox, SandboxConfig
+def bench_nbx_swebench(n_episodes: int) -> dict:
+    from nitrobox import Sandbox, SandboxConfig
 
     config = SandboxConfig(image=IMAGE, working_dir="/testbed")
 
@@ -81,7 +81,7 @@ def bench_adl_swebench(n_episodes: int) -> dict:
 
     # First create
     t0 = time.monotonic()
-    sb = Sandbox(config, name="adl-bench-swebench")
+    sb = Sandbox(config, name="nbx-bench-swebench")
     create_times.append((time.monotonic() - t0) * 1000)
 
     for ep in range(n_episodes):
@@ -118,10 +118,10 @@ def main(n_episodes: int = 20, skip_docker: bool = False):
 
     print(f"SWE-bench-style benchmark: {n_episodes} episodes × {N_CMDS_PER_EPISODE} cmds/episode\n")
 
-    # Warmup adl (cache rootfs)
-    from agentdocker_lite import Sandbox, SandboxConfig
+    # Warmup nitrobox (cache rootfs)
+    from nitrobox import Sandbox, SandboxConfig
     print("Warming up (caching rootfs)...")
-    _sb = Sandbox(SandboxConfig(image=IMAGE), name="adl-bench-warmup")
+    _sb = Sandbox(SandboxConfig(image=IMAGE), name="nbx-bench-warmup")
     _sb.delete()
 
     docker = None
@@ -129,40 +129,40 @@ def main(n_episodes: int = 20, skip_docker: bool = False):
         print("Running Docker benchmark...")
         docker = bench_docker_swebench(n_episodes)
 
-    print("Running agentdocker-lite benchmark...")
-    adl = bench_adl_swebench(n_episodes)
+    print("Running nitrobox benchmark...")
+    nbx = bench_nbx_swebench(n_episodes)
 
     # Print results
-    def _row(label, adl_v, docker_v=None):
+    def _row(label, nbx_v, docker_v=None):
         if docker_v is not None:
-            sp = docker_v / adl_v if adl_v > 0 else float("inf")
-            print(f"  {label:25s} {docker_v:8.1f} ms   {adl_v:8.1f} ms   {sp:6.1f}x")
+            sp = docker_v / nbx_v if nbx_v > 0 else float("inf")
+            print(f"  {label:25s} {docker_v:8.1f} ms   {nbx_v:8.1f} ms   {sp:6.1f}x")
         else:
-            print(f"  {label:25s} {'—':>8s}      {adl_v:8.1f} ms")
+            print(f"  {label:25s} {'—':>8s}      {nbx_v:8.1f} ms")
 
-    print(f"\n{'':25s} {'Docker':>8s}      {'adl':>8s}      {'Speedup':>7s}")
+    print(f"\n{'':25s} {'Docker':>8s}      {'nbx':>8s}      {'Speedup':>7s}")
     print(f"  {'-'*25} {'-'*8}      {'-'*8}      {'-'*7}")
-    _row("Create", adl["create_ms"], docker["create_ms"] if docker else None)
-    _row("Exec (per cmd)", adl["exec_ms"], docker["exec_ms"] if docker else None)
-    _row("Reset", adl["reset_ms"], docker["reset_ms"] if docker else None)
+    _row("Create", nbx["create_ms"], docker["create_ms"] if docker else None)
+    _row("Exec (per cmd)", nbx["exec_ms"], docker["exec_ms"] if docker else None)
+    _row("Reset", nbx["reset_ms"], docker["reset_ms"] if docker else None)
 
-    total_adl = adl["total_s"]
+    total_nbx = nbx["total_s"]
     print(f"\n  Total wall time:         ", end="")
     if docker:
         total_docker = docker["total_s"]
-        print(f"{total_docker:.1f}s (Docker)  vs  {total_adl:.1f}s (adl)  — {total_docker/total_adl:.1f}x faster")
+        print(f"{total_docker:.1f}s (Docker)  vs  {total_nbx:.1f}s (nbx)  — {total_docker/total_nbx:.1f}x faster")
     else:
-        print(f"{total_adl:.1f}s (adl)")
+        print(f"{total_nbx:.1f}s (nbx)")
 
     if docker:
         # Extrapolate to full SWE-bench (2294 instances)
         scale = 2294 / n_episodes
         docker_full = docker["total_s"] * scale
-        adl_full = adl["total_s"] * scale
-        saved = docker_full - adl_full
+        nbx_full = nbx["total_s"] * scale
+        saved = docker_full - nbx_full
         print(f"\n  Extrapolated to full SWE-bench (2,294 instances):")
         print(f"    Docker:  {docker_full/60:.0f} min")
-        print(f"    adl:     {adl_full/60:.0f} min")
+        print(f"    nbx:     {nbx_full/60:.0f} min")
         print(f"    Saved:   {saved/60:.0f} min")
 
 

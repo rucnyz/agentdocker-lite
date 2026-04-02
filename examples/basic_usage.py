@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Basic usage example for agentdocker-lite.
+"""Basic usage example for nitrobox.
 
 No root required. CRIU checkpoint and port mapping demos are
 automatically skipped when not running as root.
@@ -10,12 +10,12 @@ import shutil
 import subprocess
 import tempfile
 
-from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
 
 def main():
     # ---- Create sandbox with resource limits + security hardening ----
-    host_dir = tempfile.mkdtemp(prefix="adl_demo_vol_")
+    host_dir = tempfile.mkdtemp(prefix="nbx_demo_vol_")
     with open(os.path.join(host_dir, "host_file.txt"), "w") as f:
         f.write("from host\n")
 
@@ -76,41 +76,41 @@ def main():
 
     # ---- Filesystem snapshot/restore (no root required) ----
     sb.run("echo snapshot_v1 > /workspace/data.txt")
-    sb.fs_snapshot("/tmp/adl_demo_snapshot")
+    sb.fs_snapshot("/tmp/nbx_demo_snapshot")
 
     sb.run("echo snapshot_v2 > /workspace/data.txt")
-    sb.fs_restore("/tmp/adl_demo_snapshot")
+    sb.fs_restore("/tmp/nbx_demo_snapshot")
 
     output, _ = sb.run("cat /workspace/data.txt")
     print(f"After fs_restore: {output.strip()}")  # snapshot_v1
-    shutil.rmtree("/tmp/adl_demo_snapshot", ignore_errors=True)
+    shutil.rmtree("/tmp/nbx_demo_snapshot", ignore_errors=True)
 
     # ---- Save as Docker image ----
     sb.run("echo image_data > /workspace/exported.txt")
-    sb.save_as_image("adl-demo:cached")
-    print("Saved sandbox state as Docker image: adl-demo:cached")
+    sb.save_as_image("nbx-demo:cached")
+    print("Saved sandbox state as Docker image: nbx-demo:cached")
 
-    sb2 = Sandbox(SandboxConfig(image="adl-demo:cached", working_dir="/workspace"), name="from-cache")
+    sb2 = Sandbox(SandboxConfig(image="nbx-demo:cached", working_dir="/workspace"), name="from-cache")
     out, _ = sb2.run("cat /workspace/exported.txt")
     print(f"From cached image: {out.strip()}")  # image_data
     sb2.delete()
-    subprocess.run(["docker", "rmi", "-f", "adl-demo:cached"], capture_output=True)
+    subprocess.run(["docker", "rmi", "-f", "nbx-demo:cached"], capture_output=True)
 
     # ---- CRIU process checkpoint/restore ----
     if CheckpointManager.check_available():
         mgr = CheckpointManager(sb)
 
         sb.run("echo criu_v1 > /workspace/state.txt")
-        shutil.rmtree("/tmp/adl_demo_ckpt", ignore_errors=True)
-        mgr.save("/tmp/adl_demo_ckpt")
+        shutil.rmtree("/tmp/nbx_demo_ckpt", ignore_errors=True)
+        mgr.save("/tmp/nbx_demo_ckpt")
         print("CRIU checkpoint saved")
 
         sb.run("rm -rf /workspace/*")  # destructive action
-        mgr.restore("/tmp/adl_demo_ckpt")
+        mgr.restore("/tmp/nbx_demo_ckpt")
 
         output, _ = sb.run("cat /workspace/state.txt")
         print(f"After CRIU restore: {output.strip()}")  # criu_v1
-        shutil.rmtree("/tmp/adl_demo_ckpt", ignore_errors=True)
+        shutil.rmtree("/tmp/nbx_demo_ckpt", ignore_errors=True)
     else:
         print("CRIU not available, skipping checkpoint demo")
 
@@ -233,13 +233,13 @@ def demo_qemu_vm():
     Requires: /dev/kvm accessible (user in kvm group), QEMU installed
     in the sandbox image.
     """
-    from agentdocker_lite.vm import QemuVM
+    from nitrobox.vm import QemuVM
 
     if not QemuVM.check_available():
         print("  SKIP (KVM not available or no access)")
         return
 
-    vm_dir = tempfile.mkdtemp(prefix="adl_vm_")
+    vm_dir = tempfile.mkdtemp(prefix="nbx_vm_")
     disk = os.path.join(vm_dir, "test.qcow2")
     subprocess.run(
         ["qemu-img", "create", "-f", "qcow2", disk, "64M"],
@@ -296,10 +296,10 @@ def demo_compose():
     Starts multiple services from a compose file, runs commands,
     resets all services, and cleans up.
     """
-    from agentdocker_lite import ComposeProject
+    from nitrobox import ComposeProject
 
     # Create a minimal compose file
-    compose_path = os.path.join(tempfile.mkdtemp(prefix="adl_compose_"), "docker-compose.yml")
+    compose_path = os.path.join(tempfile.mkdtemp(prefix="nbx_compose_"), "docker-compose.yml")
     with open(compose_path, "w") as f:
         f.write("""\
 services:

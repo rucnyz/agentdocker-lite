@@ -1,8 +1,9 @@
-# agentdocker-lite
+# nitrobox
 
-[![Tests](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml)
-[![PyPI](https://img.shields.io/pypi/v/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
-[![Python](https://img.shields.io/pypi/pyversions/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
+[![Tests](https://github.com/opensage-agent/nitrobox/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/nitrobox/actions/workflows/test.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/opensage-agent/nitrobox/badge)](https://scorecard.dev/viewer/?uri=github.com/opensage-agent/nitrobox)
+[![PyPI](https://img.shields.io/pypi/v/nitrobox)](https://pypi.org/project/nitrobox/)
+[![Python](https://img.shields.io/pypi/pyversions/nitrobox)](https://pypi.org/project/nitrobox/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
@@ -14,7 +15,7 @@ Lightweight Linux namespace sandbox with persistent shell and instant filesystem
 Real-world example: [SWE-bench](https://www.swebench.com/) evaluation runs 2,294 task instances, each creating a Docker container, applying a patch, running tests, and destroying it. Here's how to migrate:
 
 <table>
-<tr><th>SWE-bench (Docker SDK)</th><th>agentdocker-lite</th></tr>
+<tr><th>SWE-bench (Docker SDK)</th><th>nitrobox</th></tr>
 <tr>
 <td>
 
@@ -39,17 +40,17 @@ for task in swebench_tasks:
 <td>
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 for task in swebench_tasks:
-    # Create — ~7ms (45x faster)
+    # Create — ~25ms (13x faster)
     sb = Sandbox(SandboxConfig.from_docker(
         task.instance_image,
     ))
-    # Eval — ~11ms/cmd (1.7x faster)
+    # Eval — ~11ms/cmd (1.6x faster)
     sb.run("bash /eval.sh")
 
-    # Reset — ~7ms (82x faster, no recreate)
+    # Reset — ~16ms (38x faster, no recreate)
     sb.reset()
 ```
 </td>
@@ -72,8 +73,8 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts (e.g. database init). ComposeProject combines entrypoint+CMD as background process matching Docker semantics
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
 - **Docker layer caching**: Shared base layers across images, skip pull when cached
-- **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces
-- **CLI**: `adl ps/kill/cleanup` for sandbox management
+- **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces, Docker-matching health check daemon (`interval`, `start_period`, `start_interval`, `retries`)
+- **CLI**: `nitrobox ps/kill/cleanup` for sandbox management
 
 ## Requirements
 
@@ -98,28 +99,44 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 ## Install
 
 ```bash
-pip install agentdocker-lite
+pip install nitrobox
+```
+
+### Development build
+
+Requires [Rust](https://rustup.rs/) and [maturin](https://www.maturin.rs/):
+
+```bash
+pip install maturin
+maturin develop --release        # build Rust core + install in-place
+pytest tests/                    # run tests
+```
+
+To regenerate type stubs after changing Rust bindings:
+
+```bash
+cargo run --bin stub_gen --release
 ```
 
 ## Quick start
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 config = SandboxConfig(
     image="ubuntu:22.04",
     working_dir="/workspace",
 )
-sb = Sandbox(config, name="worker-0")
 
-output, ec = sb.run("echo hello world")
-print(output)  # "hello world\n"
+with Sandbox(config, name="worker-0") as sb:
+    output, ec = sb.run("echo hello world")
+    print(output)  # "hello world\n"
 
-sb.write_file("/workspace/payload.py", "print('hello')")
-content = sb.read_file("/workspace/payload.py")
+    sb.write_file("/workspace/payload.py", "print('hello')")
+    content = sb.read_file("/workspace/payload.py")
 
-sb.reset()   # instant filesystem reset
-sb.delete()  # full cleanup
+    sb.reset()   # instant filesystem reset
+# auto cleanup on exit
 ```
 
 No `sudo` required. The sandbox automatically uses user namespaces for full isolation. OCI image config (`WORKDIR`, `ENV`, `ENTRYPOINT`) is auto-applied — user values take precedence.
@@ -167,7 +184,7 @@ SandboxConfig(
     devices=["/dev/nvidia0", "/dev/nvidiactl"],
 
     # Capabilities
-    cap_add=["NET_RAW", "NET_ADMIN"],  # Extra capabilities to keep (applied at runtime via adl-seccomp)
+    cap_add=["NET_RAW", "NET_ADMIN"],  # Extra capabilities to keep (applied at runtime via Rust init chain)
 
     # OCI entrypoint (auto-filled from image config if not set)
     # Direct Sandbox API: wraps the shell; ComposeProject: runs as background with CMD
@@ -203,6 +220,8 @@ SandboxConfig(
 | `await sb.arun(cmd)` | Async version of `run()` |
 | `await sb.areset()` | Async version of `reset()` |
 | `await sb.adelete()` | Async version of `delete()` |
+| `await sb.asnapshot()` | Async version of `fs_snapshot()` |
+| `await sb.arestore()` | Async version of `fs_restore()` |
 
 ### Snapshots (RL step-wise rollback)
 
@@ -246,7 +265,7 @@ await asyncio.gather(*(rollout(i) for i in range(100)))
 Full process-state checkpoint/restore — memory, registers, fds, cwd. Requires root; CRIU binary is bundled.
 
 ```python
-from agentdocker_lite import CheckpointManager
+from nitrobox import CheckpointManager
 
 mgr = CheckpointManager(sb)
 sb.run("echo state_v1 > /workspace/data.txt")
@@ -261,14 +280,15 @@ output, _ = sb.run("cat /workspace/data.txt")
 
 ## Performance
 
-| | Docker | agentdocker-lite | Speedup |
+| | Docker | nitrobox | Speedup |
 |---|---|---|---|
-| Create | 320ms | 7ms | **45x** |
-| Per command | 17ms | 11ms | **1.7x** |
-| Reset | 605ms | 7ms | **82x** |
-| Delete | 217ms | 2ms | **127x** |
-| Reset loop (100 cycles) | 2.0/s | 57.1/s | **29x** |
-| 16x concurrent | 32 cmd/s | 1009 cmd/s | **32x** |
+| Create | 320ms | 25ms | **13x** |
+| Per command | 17ms | 11ms | **1.6x** |
+| Reset | 605ms | 16ms | **38x** |
+| Delete | 217ms | 2ms | **109x** |
+| Throughput | — | 94 cmd/s | — |
+| Reset loop | 2.0/s | 62.8/s | **31x** |
+| 16x concurrent | 32 cmd/s | 655 cmd/s | **20x** |
 
 Full benchmark (checkpoint, concurrency, sustained workloads): [docs/quick_start.md](docs/quick_start.md#performance) | Reproduce: `python examples/benchmark.py`
 
@@ -276,13 +296,13 @@ Full benchmark (checkpoint, concurrency, sustained workloads): [docs/quick_start
 
 **Auto-convert** — paste your existing Docker invocation directly:
 
-| Docker | agentdocker-lite |
+| Docker | nitrobox |
 |---|---|
 | `client.containers.run("img", cpus=0.5, ...)` | `SandboxConfig.from_docker("img", cpus=0.5, ...)` |
 | `docker run --cpus=0.5 -m 512m img` | `SandboxConfig.from_docker_run("docker run ...")` |
 | `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
 
-See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compose field support, and CLI reference (`adl ps/kill/cleanup`).
+See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compose field support, and CLI reference (`nitrobox ps/kill/cleanup`).
 
 ## Architecture
 
@@ -313,7 +333,7 @@ Host kernel (shared)
 
 ```bash
 python examples/basic_usage.py      # Full feature demo
-python examples/bench_swebench.py   # SWE-bench-style Docker vs adl comparison
+python examples/bench_swebench.py   # SWE-bench-style Docker vs nitrobox comparison
 python examples/benchmark.py        # Full performance comparison (all backends)
 ```
 
