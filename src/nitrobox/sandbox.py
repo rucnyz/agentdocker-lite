@@ -21,12 +21,11 @@ from nitrobox._errors import (
     SandboxConfigError,
     SandboxInitError,
     SandboxKernelError,
-    SandboxTimeoutError,
 )
 from nitrobox.config import SandboxConfig, cap_names_to_numbers
 
 if TYPE_CHECKING:
-    from nitrobox._shell import _PersistentShell
+    pass
 
 logger = logging.getLogger(__name__)
 

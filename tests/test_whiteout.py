@@ -12,15 +12,19 @@ from nitrobox._core import py_convert_whiteouts
 
 
 def _can_set_user_xattr(tmp_path: Path) -> bool:
-    """Check if user.* xattrs are supported on the filesystem."""
+    """Check if user.* xattrs are supported and setfattr is available."""
     test_file = tmp_path / ".xattr_test"
     test_file.touch()
-    result = subprocess.run(
-        ["setfattr", "-n", "user.test", "-v", "1", str(test_file)],
-        capture_output=True,
-    )
-    test_file.unlink()
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["setfattr", "-n", "user.test", "-v", "1", str(test_file)],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False  # setfattr not installed
+    finally:
+        test_file.unlink(missing_ok=True)
 
 
 class TestWhiteoutXattr:

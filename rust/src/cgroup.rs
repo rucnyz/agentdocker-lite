@@ -124,10 +124,17 @@ pub fn cleanup_cgroup(cgroup_path: &Path) -> io::Result<()> {
         }
     }
 
-    // Remove the cgroup directory
-    match fs::remove_dir(cgroup_path) {
-        Ok(()) => {}
-        Err(e) => log::debug!("cgroup cleanup (non-fatal): {e}"),
+    // Remove the cgroup directory.  After SIGKILL, processes may take a
+    // moment to exit and leave the cgroup, so retry briefly.
+    for i in 0..20 {
+        match fs::remove_dir(cgroup_path) {
+            Ok(()) => return Ok(()),
+            Err(_) if i < 19 => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(e) => {
+                log::debug!("cgroup cleanup (non-fatal): {e}");
+                break;
+            }
+        }
     }
     Ok(())
 }

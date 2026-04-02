@@ -15,7 +15,7 @@ import threading
 import time
 from typing import TypedDict
 
-from nitrobox._errors import SandboxInitError, SandboxTimeoutError
+from nitrobox._errors import SandboxInitError
 
 logger = logging.getLogger(__name__)
 
