@@ -108,16 +108,31 @@ class TestCheckpointSaveRestore:
             assert f"cmd_{i}" in out
 
     def test_leave_running(self, sandbox, ckpt_path):
-        """Sandbox keeps running after save with leave_running=True."""
+        """Sandbox keeps running after save with leave_running=True.
+
+        Verifies the shell process is truly the SAME process (not
+        restarted) by checking that an environment variable set before
+        save survives — a restarted shell would lose it.
+        """
         sandbox.run("echo before > /workspace/test.txt")
+        # Set an env var that only lives in the current shell process.
+        sandbox.run("export _NBX_CKPT_ALIVE=yes_same_shell")
         mgr = CheckpointManager(sandbox)
         mgr.save(ckpt_path, leave_running=True)
 
-        # Sandbox should still work
+        # Shell should be the SAME process (not restarted).
+        out, ec = sandbox.run("echo $_NBX_CKPT_ALIVE")
+        assert ec == 0
+        assert "yes_same_shell" in out, (
+            f"Shell env var lost after save — shell may have restarted: {out!r}"
+        )
+
+        # File state should be preserved.
         out, ec = sandbox.run("cat /workspace/test.txt")
         assert ec == 0
         assert "before" in out
 
+        # Shell should still accept new commands.
         sandbox.run("echo after > /workspace/test.txt")
         out, _ = sandbox.run("cat /workspace/test.txt")
         assert "after" in out
