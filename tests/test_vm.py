@@ -314,6 +314,7 @@ class _MockQGAServer:
         self._srv.listen(4)
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self.exec_output = b"mock output\n"
+        self.exec_stderr = b""  # stderr output (err-data)
         self.exec_exitcode = 0
         self.exec_never_exits = False  # for timeout testing
         self.file_content = b"mock file content"
@@ -353,7 +354,10 @@ class _MockQGAServer:
                 args = req.get("arguments", {})
 
                 if cmd == "guest-sync-delimited":
+                    # Real QGA prefixes sync response with 0xFF delimiter.
                     resp = {"return": args["id"]}
+                    conn.sendall(b"\xff" + json.dumps(resp).encode() + b"\n")
+                    continue
                 elif cmd == "guest-ping":
                     resp = {"return": {}}
                 elif cmd == "guest-exec":
@@ -362,11 +366,14 @@ class _MockQGAServer:
                     if self.exec_never_exits:
                         resp = {"return": {"exited": False}}
                     else:
-                        resp = {"return": {
+                        ret: dict = {
                             "exited": True,
                             "exitcode": self.exec_exitcode,
                             "out-data": base64.b64encode(self.exec_output).decode(),
-                        }}
+                        }
+                        if self.exec_stderr:
+                            ret["err-data"] = base64.b64encode(self.exec_stderr).decode()
+                        resp = {"return": ret}
                 elif cmd == "guest-file-open":
                     self._file_read_offset = 0
                     resp = {"return": 1}
@@ -461,6 +468,17 @@ class TestQGAProtocol:
         vm, _ = mock_qga
         # Should return immediately since mock always responds
         vm.wait_guest_ready(timeout=3)
+
+    def test_guest_exec_stderr(self, mock_qga):
+        """guest_exec captures stderr via err-data."""
+        vm, server = mock_qga
+        server.exec_output = b"stdout line\n"
+        server.exec_stderr = b"stderr line\n"
+        server.exec_exitcode = 1
+        output, ec = vm.guest_exec("cmd", timeout=5)
+        assert ec == 1
+        assert "stdout line" in output
+        assert "stderr line" in output
 
     def test_guest_exec_timeout(self, mock_qga):
         """guest_exec raises TimeoutError when command never exits."""
