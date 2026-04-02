@@ -191,7 +191,7 @@ fn mount_overlay_fs(config: &SandboxSpawnConfig) -> io::Result<()> {
     Ok(())
 }
 
-fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool) {
+fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool, host_sys: Option<&str>) {
     let proc_path = format!("{}/proc", rootfs);
     let _ = std::fs::create_dir_all(&proc_path);
     if let Err(e) = mnt(Some("proc"), &proc_path, Some("proc"), MsFlags::empty(), None) {
@@ -207,9 +207,12 @@ fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool) {
                 log::debug!("mount fresh sysfs failed: {}", e);
             }
         } else {
-            // vm_mode without net_isolate: bind-mount host's /sys read-only
+            // vm_mode without net_isolate: bind-mount host's /sys read-only.
+            // After pivot_root, /sys is inside the overlayfs (empty).
+            // Use host_sys (e.g. /.pivot_old/sys) to reach real sysfs.
+            let src = host_sys.unwrap_or("/sys");
             if let Err(e) = mnt(
-                Some("/sys"), &sys_path, None::<&str>,
+                Some(src), &sys_path, None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REC, None,
             ) {
                 log::debug!("bind-mount /sys failed: {}", e);
@@ -1054,7 +1057,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         if let Err(e) = do_pivot_root_phase1(&config.rootfs) {
             init_fatal(err_w, &format!("pivot_root failed: {}", e));
         }
-        mount_proc("/", config.net_isolate, config.vm_mode);
+        mount_proc("/", config.net_isolate, config.vm_mode, Some("/.pivot_old/sys"));
         setup_dev_rootful("/");
         mount_shm("/", config.shm_size);
         // Mount host devices from /.pivot_old BEFORE we detach it.
@@ -1083,7 +1086,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         }
         precreate_volume_mountpoints(config);
         if config.read_only { make_rootfs_readonly(&config.rootfs); }
-        mount_proc(&config.rootfs, config.net_isolate, config.vm_mode);
+        mount_proc(&config.rootfs, config.net_isolate, config.vm_mode, None);
         setup_dev_rootless(&config.rootfs);
         mount_shm(&config.rootfs, config.shm_size);
         mount_devices(&config.rootfs, &config.devices);

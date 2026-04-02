@@ -6,7 +6,9 @@
 pub mod cgroup;
 pub mod init;
 pub mod mount;
+pub mod nsenter;
 pub mod pidfd;
+pub mod proc;
 pub mod qmp;
 pub mod security;
 pub mod userns;
@@ -67,6 +69,62 @@ fn py_mount_overlay(
     target: &str,
 ) -> PyResult<()> {
     mount::mount_overlay(lowerdir_spec, upper_dir, work_dir, target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Bind mount ``source`` onto ``target``.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_bind_mount(source: &str, target: &str) -> PyResult<()> {
+    mount::bind_mount(source, target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Recursive bind mount (``mount --rbind``).
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_rbind_mount(source: &str, target: &str) -> PyResult<()> {
+    mount::rbind_mount(source, target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Make a mount point private.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_make_private(target: &str) -> PyResult<()> {
+    mount::make_private(target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Remount a bind mount as read-only.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_remount_ro_bind(target: &str) -> PyResult<()> {
+    mount::remount_ro_bind(target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Lazy unmount (``umount -l``).
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_umount_lazy(target: &str) -> PyResult<()> {
+    mount::umount_lazy(target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Regular unmount.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_umount(target: &str) -> PyResult<()> {
+    mount::umount(target)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Recursive lazy unmount (``umount -R -l``).
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_umount_recursive_lazy(target: &str) -> PyResult<()> {
+    mount::umount_recursive_lazy(target)
         .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
@@ -364,6 +422,47 @@ fn py_userns_fixup_for_delete(userns_pid: i32, dir_path: &str) -> PyResult<u32> 
 }
 
 // ======================================================================
+// Namespace enter (popen preexec)
+// ======================================================================
+
+/// Enter mount namespace + chroot + chdir for rootful ``popen()``.
+///
+/// Called from ``preexec_fn`` (after fork, before exec).  Replaces the
+/// ``nsenter`` subprocess with direct ``setns()`` + ``chroot()`` syscalls.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_nsenter_preexec(target_pid: i32) -> PyResult<()> {
+    nsenter::nsenter_preexec(target_pid)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Enter user + mount namespace + chroot + chdir for userns ``popen()``.
+///
+/// Like :func:`py_nsenter_preexec` but also joins the user namespace
+/// and chroots to an explicit *rootfs* path (needed for rootless).
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_userns_preexec(target_pid: i32, rootfs: &str, working_dir: &str) -> PyResult<()> {
+    nsenter::userns_preexec(target_pid, rootfs, working_dir)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+// ======================================================================
+// Process helpers (fuser)
+// ======================================================================
+
+/// Kill all processes with open fds to *target_path* (replaces ``fuser -k``).
+///
+/// Walks ``/proc/*/fd/`` and sends ``SIGKILL`` to matching PIDs.
+/// Returns the number of processes killed.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_fuser_kill(target_path: &str) -> PyResult<u32> {
+    r#proc::fuser_kill(target_path)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+// ======================================================================
 // Whiteout conversion
 // ======================================================================
 
@@ -393,6 +492,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // mount
     m.add_function(wrap_pyfunction!(py_check_new_mount_api, m)?)?;
     m.add_function(wrap_pyfunction!(py_mount_overlay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bind_mount, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rbind_mount, m)?)?;
+    m.add_function(wrap_pyfunction!(py_make_private, m)?)?;
+    m.add_function(wrap_pyfunction!(py_remount_ro_bind, m)?)?;
+    m.add_function(wrap_pyfunction!(py_umount, m)?)?;
+    m.add_function(wrap_pyfunction!(py_umount_lazy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_umount_recursive_lazy, m)?)?;
 
     // security
     m.add_function(wrap_pyfunction!(py_build_seccomp_bpf, m)?)?;
@@ -426,6 +532,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // userns cleanup
     m.add_function(wrap_pyfunction!(py_userns_fixup_for_delete, m)?)?;
+
+    // nsenter (popen preexec)
+    m.add_function(wrap_pyfunction!(py_nsenter_preexec, m)?)?;
+    m.add_function(wrap_pyfunction!(py_userns_preexec, m)?)?;
+
+    // proc (fuser)
+    m.add_function(wrap_pyfunction!(py_fuser_kill, m)?)?;
 
     Ok(())
 }

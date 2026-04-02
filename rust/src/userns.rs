@@ -71,7 +71,7 @@ pub fn fixup_dir_for_delete(userns_pid: i32, dir_path: &Path) -> io::Result<u32>
         return Err(io::Error::last_os_error());
     }
 
-    if unsafe { libc::WIFEXITED(status) } && unsafe { libc::WEXITSTATUS(status) } == 0 {
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
         Ok(0) // Can't easily return count across fork; 0 = success
     } else {
         Err(io::Error::new(

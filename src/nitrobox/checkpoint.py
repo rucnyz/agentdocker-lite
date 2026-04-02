@@ -392,9 +392,11 @@ class CheckpointManager:
         if upper:
             rootfs = self._sandbox._rootfs
             # Unmount overlayfs.
-            subprocess.run(
-                ["umount", str(rootfs)], capture_output=True,
-            )
+            from nitrobox._core import py_umount
+            try:
+                py_umount(str(rootfs))
+            except OSError:
+                pass
             # Replace upper layer.
             if upper.exists():
                 shutil.rmtree(upper)
@@ -454,10 +456,8 @@ class CheckpointManager:
         env_dir = getattr(self._sandbox, "_env_dir", None)
         criu_root = Path(str(env_dir or rootfs.parent)) / "criu-root"
         criu_root.mkdir(exist_ok=True)
-        subprocess.run(
-            ["mount", "--rbind", str(rootfs), str(criu_root)],
-            capture_output=True, check=True,
-        )
+        from nitrobox._core import py_rbind_mount
+        py_rbind_mount(str(rootfs), str(criu_root))
         opts = rpc.criu_opts()
         opts.images_dir_fd = os.open(str(criu_dir), os.O_DIRECTORY)
         opts.root = str(criu_root)

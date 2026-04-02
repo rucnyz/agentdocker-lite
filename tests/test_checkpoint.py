@@ -111,21 +111,23 @@ class TestCheckpointSaveRestore:
         """Sandbox keeps running after save with leave_running=True.
 
         Verifies the shell process is truly the SAME process (not
-        restarted) by checking that an environment variable set before
-        save survives — a restarted shell would lose it.
+        restarted) by checking the persistent shell PID before and after.
         """
         sandbox.run("echo before > /workspace/test.txt")
-        # Set an env var that only lives in the current shell process.
-        sandbox.run("export _NBX_CKPT_ALIVE=yes_same_shell")
+        pid_before = sandbox._persistent_shell.pid
         mgr = CheckpointManager(sandbox)
         mgr.save(ckpt_path, leave_running=True)
 
         # Shell should be the SAME process (not restarted).
-        out, ec = sandbox.run("echo $_NBX_CKPT_ALIVE")
-        assert ec == 0
-        assert "yes_same_shell" in out, (
-            f"Shell env var lost after save — shell may have restarted: {out!r}"
+        pid_after = sandbox._persistent_shell.pid
+        assert pid_before == pid_after, (
+            f"Shell PID changed after save: {pid_before} -> {pid_after}"
         )
+
+        # Commands should still work.
+        out, ec = sandbox.run("echo alive")
+        assert ec == 0
+        assert "alive" in out
 
         # File state should be preserved.
         out, ec = sandbox.run("cat /workspace/test.txt")

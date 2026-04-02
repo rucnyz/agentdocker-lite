@@ -108,3 +108,94 @@ pub fn mount_overlay(
 
     mount_overlay_legacy(lowerdir_spec, upper_dir, work_dir, target)
 }
+
+/// Bind mount `source` onto `target`.
+pub fn bind_mount(source: &str, target: &str) -> io::Result<()> {
+    nix::mount::mount(
+        Some(source),
+        target,
+        None::<&str>,
+        nix::mount::MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Recursive bind mount (`mount --rbind`).
+pub fn rbind_mount(source: &str, target: &str) -> io::Result<()> {
+    nix::mount::mount(
+        Some(source),
+        target,
+        None::<&str>,
+        nix::mount::MsFlags::MS_BIND | nix::mount::MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Make a mount point private (`mount --make-private`).
+pub fn make_private(target: &str) -> io::Result<()> {
+    nix::mount::mount(
+        None::<&str>,
+        target,
+        None::<&str>,
+        nix::mount::MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Remount a bind mount as read-only (`mount -o remount,ro,bind`).
+pub fn remount_ro_bind(target: &str) -> io::Result<()> {
+    nix::mount::mount(
+        None::<&str>,
+        target,
+        None::<&str>,
+        nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Lazy unmount (`umount -l`).
+pub fn umount_lazy(target: &str) -> io::Result<()> {
+    nix::mount::umount2(target, nix::mount::MntFlags::MNT_DETACH)
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Regular unmount.
+pub fn umount(target: &str) -> io::Result<()> {
+    nix::mount::umount2(target, nix::mount::MntFlags::empty())
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))
+}
+
+/// Recursive lazy unmount (`umount -R -l`).
+///
+/// First tries recursive unmount via `MNT_DETACH`.  The kernel doesn't
+/// have a single "recursive + detach" flag, so we scan `/proc/self/mountinfo`
+/// and lazily unmount every sub-mount bottom-up before the target itself.
+pub fn umount_recursive_lazy(target: &str) -> io::Result<()> {
+    // Read mountinfo to find all sub-mounts under `target`.
+    let minfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let mut sub_mounts: Vec<String> = Vec::new();
+
+    for line in minfo.lines() {
+        // Fields: id parent_id major:minor root mount_point ...
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 5 {
+            let mount_point = fields[4];
+            if mount_point.starts_with(target) {
+                sub_mounts.push(mount_point.to_string());
+            }
+        }
+    }
+
+    // Sort by length descending (deepest first).
+    sub_mounts.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    for mp in &sub_mounts {
+        let _ = nix::mount::umount2(mp.as_str(), nix::mount::MntFlags::MNT_DETACH);
+    }
+
+    Ok(())
+}

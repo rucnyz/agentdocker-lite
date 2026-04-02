@@ -163,7 +163,11 @@ class Sandbox:
         if env_dir and env_dir.exists():
             rootfs = getattr(self, "_rootfs", None)
             if rootfs and not self._userns:
-                subprocess.run(["umount", "-l", str(rootfs)], capture_output=True)
+                from nitrobox._core import py_umount_lazy
+                try:
+                    py_umount_lazy(str(rootfs))
+                except OSError:
+                    pass
             for child in env_dir.rglob("*"):
                 try:
                     child.chmod(0o700)
@@ -311,16 +315,14 @@ class Sandbox:
         shell_pid = self._persistent_shell.pid
 
         if self._userns:
+            from nitrobox._core import py_userns_preexec
+
+            _shell_pid = shell_pid
             _rootfs = str(self._rootfs)
             _wd = self._config.working_dir or "/"
 
             def _userns_preexec() -> None:
-                with open(f"/proc/{shell_pid}/ns/user") as f:
-                    os.setns(f.fileno(), 0)
-                with open(f"/proc/{shell_pid}/ns/mnt") as f:
-                    os.setns(f.fileno(), 0)
-                os.chroot(_rootfs)
-                os.chdir(_wd)
+                py_userns_preexec(_shell_pid, _rootfs, _wd)
 
             defaults: dict[str, Any] = {
                 "stdin": subprocess.PIPE,
@@ -331,24 +333,23 @@ class Sandbox:
             defaults.update(kwargs)
             proc = subprocess.Popen(cmd_args, preexec_fn=_userns_preexec, **defaults)
         else:
-            full_cmd = [
-                "nsenter",
-                f"--target={shell_pid}",
-                "--pid",
-                "--mount",
-                "--root",
-                "--wd=/",
-                "--",
-            ] + cmd_args
+            from nitrobox._core import py_nsenter_preexec
 
-            defaults = {
+            _shell_pid = shell_pid
+
+            def _rootful_preexec() -> None:
+                py_nsenter_preexec(_shell_pid)
+
+            defaults: dict[str, Any] = {
                 "stdin": subprocess.PIPE,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "env": self._cached_env,
             }
             defaults.update(kwargs)
-            proc = subprocess.Popen(full_cmd, **defaults)
+            proc = subprocess.Popen(
+                cmd_args, preexec_fn=_rootful_preexec, **defaults
+            )
 
         logger.debug("popen pid=%d in sandbox: %s", proc.pid, cmd_args)
         return proc
@@ -490,7 +491,11 @@ class Sandbox:
         # Clean up Rust-side pasta netns bind mount before directory operations.
         netns_file = self._env_dir / ".netns"
         if netns_file.exists():
-            subprocess.run(["umount", "-l", str(netns_file)], capture_output=True)
+            from nitrobox._core import py_umount_lazy
+            try:
+                py_umount_lazy(str(netns_file))
+            except OSError:
+                pass
 
         if self._userns:
             # Mount namespace died with shell -- mounts auto-cleaned.
@@ -583,7 +588,11 @@ class Sandbox:
         # Clean up Rust-side pasta netns bind mount (userns mode).
         netns_file = self._env_dir / ".netns"
         if netns_file.exists():
-            subprocess.run(["umount", "-l", str(netns_file)], capture_output=True)
+            from nitrobox._core import py_umount_lazy
+            try:
+                py_umount_lazy(str(netns_file))
+            except OSError:
+                pass
 
         if self._env_dir.exists():
             if self._userns:
@@ -625,7 +634,11 @@ class Sandbox:
         rootfs = getattr(self, "_rootfs", None)
         base_rootfs = getattr(self, "_base_rootfs", None)
         if not self._userns and rootfs:
-            subprocess.run(["umount", str(rootfs)], capture_output=True)
+            from nitrobox._core import py_umount
+            try:
+                py_umount(str(rootfs))
+            except OSError:
+                pass
 
         if self._userns:
             for child in upper.iterdir():
@@ -801,15 +814,23 @@ class Sandbox:
 
             rootfs_dir = entry / "rootfs"
             if rootfs_dir.exists():
-                subprocess.run(
-                    ["umount", "-R", "-l", str(rootfs_dir)],
-                    capture_output=True,
-                )
+                from nitrobox._core import py_umount_recursive_lazy
+                try:
+                    py_umount_recursive_lazy(str(rootfs_dir))
+                except OSError:
+                    pass
 
             netns_path = Path(f"/run/netns/nitrobox-{entry.name}")
             if netns_path.exists():
-                subprocess.run(["fuser", "-k", str(netns_path)], capture_output=True)
-                subprocess.run(["umount", str(netns_path)], capture_output=True)
+                from nitrobox._core import py_fuser_kill, py_umount
+                try:
+                    py_fuser_kill(str(netns_path))
+                except OSError:
+                    pass
+                try:
+                    py_umount(str(netns_path))
+                except OSError:
+                    pass
                 try:
                     netns_path.unlink()
                 except OSError:
@@ -1370,17 +1391,22 @@ class Sandbox:
             str(self._rootfs),
         )
 
-        subprocess.run(
-            ["mount", "--make-private", str(self._rootfs)],
-            capture_output=True,
-        )
+        from nitrobox._core import py_make_private
+        try:
+            py_make_private(str(self._rootfs))
+        except OSError:
+            pass
 
         self._overlay_mounted = True
         logger.debug("Mounted overlayfs at %s", self._rootfs)
 
     def _reset_overlayfs(self) -> None:
         if self._overlay_mounted:
-            subprocess.run(["umount", "-l", str(self._rootfs)], capture_output=True)
+            from nitrobox._core import py_umount_lazy
+            try:
+                py_umount_lazy(str(self._rootfs))
+            except OSError:
+                pass
             self._overlay_mounted = False
 
         self._cleanup_dead_dirs()
@@ -1472,25 +1498,25 @@ class Sandbox:
     def _bind_mount(
         self, host_path: str, container_path: str, read_only: bool = False
     ) -> None:
+        from nitrobox._core import py_bind_mount, py_remount_ro_bind
+
         target = self._rootfs / container_path.lstrip("/")
         target.mkdir(parents=True, exist_ok=True)
 
-        result = subprocess.run(
-            ["mount", "--bind", host_path, str(target)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
+        try:
+            py_bind_mount(host_path, str(target))
+        except OSError as e:
             logger.warning("Failed to bind mount %s -> %s: %s",
-                           host_path, container_path, result.stderr.strip())
+                           host_path, container_path, e)
             return
 
         self._bind_mounts.append(target)
 
         if read_only:
-            subprocess.run(
-                ["mount", "-o", "remount,ro,bind", str(target)],
-                capture_output=True,
-            )
+            try:
+                py_remount_ro_bind(str(target))
+            except OSError:
+                pass
 
     def _overlay_mount(self, host_path: str, container_path: str) -> None:
         """Mount a host directory as copy-on-write via overlayfs."""
@@ -1517,17 +1543,25 @@ class Sandbox:
         self._cow_tmpdirs.append(work_base)
 
     def _unmount_binds(self) -> None:
+        from nitrobox._core import py_umount_lazy
         for mount_point in reversed(self._bind_mounts):
-            subprocess.run(["umount", "-l", str(mount_point)], capture_output=True)
+            try:
+                py_umount_lazy(str(mount_point))
+            except OSError:
+                pass
         self._bind_mounts.clear()
         for tmpdir in self._cow_tmpdirs:
             shutil.rmtree(tmpdir, ignore_errors=True)
         self._cow_tmpdirs = []
 
     def _unmount_all(self) -> None:
+        from nitrobox._core import py_umount_recursive_lazy
         self._unmount_binds()
         if self._fs_backend == "overlayfs" and self._overlay_mounted:
-            subprocess.run(["umount", "-R", "-l", str(self._rootfs)], capture_output=True)
+            try:
+                py_umount_recursive_lazy(str(self._rootfs))
+            except OSError:
+                pass
             self._overlay_mounted = False
 
     # ================================================================== #
@@ -1605,20 +1639,22 @@ class Sandbox:
 
         # Bind mount the sandbox's netns to /run/netns/ so pasta can open it
         # (pasta's internal sandboxing blocks direct /proc/{pid}/ns/net access).
+        from nitrobox._core import py_bind_mount, py_umount_lazy
+
         netns_path = f"/run/netns/{netns_name}"
         os.makedirs("/run/netns", exist_ok=True)
         if os.path.exists(netns_path):
-            subprocess.run(["umount", "-l", netns_path], capture_output=True)
+            try:
+                py_umount_lazy(netns_path)
+            except OSError:
+                pass
             try:
                 os.unlink(netns_path)
             except OSError:
                 pass
         fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
         os.close(fd)
-        subprocess.run(
-            ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
-            capture_output=True, check=True,
-        )
+        py_bind_mount(f"/proc/{shell_pid}/ns/net", netns_path)
         self._netns_path = netns_path
 
         cmd: list[str] = [
@@ -1653,7 +1689,11 @@ class Sandbox:
         """Clean up rootful pasta netns bind mount."""
         netns_path = getattr(self, "_netns_path", None)
         if netns_path and os.path.exists(netns_path):
-            subprocess.run(["umount", "-l", netns_path], capture_output=True)
+            from nitrobox._core import py_umount_lazy
+            try:
+                py_umount_lazy(netns_path)
+            except OSError:
+                pass
             try:
                 os.unlink(netns_path)
             except OSError:
