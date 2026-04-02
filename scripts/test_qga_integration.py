@@ -70,7 +70,7 @@ def main() -> None:
         description="QGA integration tests with real Ubuntu VM",
     )
     parser.add_argument("--vm-dir", default=VM_DIR_DEFAULT,
-                        help="VM files directory (default: dev/vm)")
+                        help="VM files directory (default: scripts/vm)")
     parser.add_argument("--fresh", action="store_true",
                         help="Ignore existing 'ready' snapshot, redo first boot")
     args = parser.parse_args()

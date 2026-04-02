@@ -242,7 +242,7 @@ def main() -> None:
         description="Build test VM for QGA integration testing",
     )
     parser.add_argument("--vm-dir", default="scripts/vm",
-                        help="Output directory (default: dev/vm)")
+                        help="Output directory (default: scripts/vm)")
     parser.add_argument("--force", action="store_true",
                         help="Re-download base image even if cached")
     args = parser.parse_args()
