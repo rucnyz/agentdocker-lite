@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nitrobox"
-version = "0.0.5"
+version = "0.0.6"
 description = "Lightweight Linux namespace sandbox with persistent shell and instant reset"
 requires-python = ">=3.12"
 license = "Apache-2.0"

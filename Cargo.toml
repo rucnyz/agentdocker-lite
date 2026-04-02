@@ -1,6 +1,6 @@
 [package]
 name = "nitrobox-core"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ path = "rust/src/bin/stub_gen.rs"
 
 [dependencies]
 pyo3 = "0.28"
-pyo3-stub-gen = "0.20"
+pyo3-stub-gen = "0.21"
 nix = { version = "0.31", features = [
     "sched",     # unshare, setns
     "mount",     # mount, umount2
