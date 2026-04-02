@@ -7,7 +7,7 @@ restore).  Both use the same OSWorld Ubuntu Desktop qcow2 image.
 
 The speedup comes from the reset strategy (loadvm vs restart), not from
 the sandbox layer.  OSWorld's Docker provider cannot use loadvm because
-it destroys the QEMU process on every reset.  adl's QemuVM keeps QEMU
+it destroys the QEMU process on every reset.  nitrobox's QemuVM keeps QEMU
 alive and uses QMP to restore state in-place.
 
 Requires:
@@ -31,7 +31,7 @@ import subprocess
 import time
 
 # ---------------------------------------------------------------------------
-# QMP helpers (same protocol as agentdocker_lite.vm.QemuVM)
+# QMP helpers (same protocol as nitrobox.vm.QemuVM)
 # ---------------------------------------------------------------------------
 
 def _qmp_send(sock_path: str, command: str, arguments: dict = None) -> dict:
@@ -159,19 +159,19 @@ def bench_osworld_docker_reset(qcow2: str, rounds: int, memory: str,
 
 
 # ---------------------------------------------------------------------------
-# adl QemuVM (loadvm) reset benchmark
+# nbx QemuVM (loadvm) reset benchmark
 # ---------------------------------------------------------------------------
 
-def bench_adl_loadvm_reset(qcow2: str, rounds: int, memory: str,
+def bench_nbx_loadvm_reset(qcow2: str, rounds: int, memory: str,
                            cpus: int) -> dict:
     """Benchmark QEMU loadvm reset (same operation as QemuVM.loadvm).
 
-    Uses raw QMP commands — same protocol as agentdocker_lite.vm.QemuVM.
+    Uses raw QMP commands — same protocol as nitrobox.vm.QemuVM.
     The QemuVM wrapper adds ~12ms overhead per call.
     """
-    qmp_sock = "/tmp/adl_bench_osworld_qmp.sock"
+    qmp_sock = "/tmp/nbx_bench_osworld_qmp.sock"
 
-    print(f"\n=== adl QemuVM reset (loadvm) ===")
+    print(f"\n=== nbx QemuVM reset (loadvm) ===")
     print(f"  VM: {memory} RAM, {cpus} CPUs")
 
     try:
@@ -193,8 +193,8 @@ def bench_adl_loadvm_reset(qcow2: str, rounds: int, memory: str,
                             stderr=subprocess.DEVNULL)
 
     # Wait for QMP
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
+    denbxine = time.monotonic() + 120
+    while time.monotonic() < denbxine:
         if os.path.exists(qmp_sock):
             try:
                 _qmp_send(qmp_sock, "query-status")
@@ -244,7 +244,7 @@ def bench_adl_loadvm_reset(qcow2: str, rounds: int, memory: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark VM reset: OSWorld Docker vs adl QemuVM (loadvm)")
+        description="Benchmark VM reset: OSWorld Docker vs nbx QemuVM (loadvm)")
     parser.add_argument("--qcow2", default=None,
                         help="Path to OSWorld Ubuntu.qcow2")
     parser.add_argument("--rounds", type=int, default=5,
@@ -275,42 +275,42 @@ def main():
         print("ERROR: /dev/kvm not accessible (need kvm group)")
         return
 
-    print("VM Reset Benchmark: OSWorld Docker vs adl QemuVM (loadvm)")
+    print("VM Reset Benchmark: OSWorld Docker vs nbx QemuVM (loadvm)")
     print(f"Image: {qcow2} ({os.path.getsize(qcow2) // 1024**3}GB)")
     print(f"VM: {args.memory} RAM, {args.cpus} CPUs, {args.rounds} rounds")
     print()
     print("Both use the same OSWorld Ubuntu Desktop qcow2 and QEMU/KVM.")
     print("The difference is reset strategy:")
     print("  OSWorld: destroy container → new container → reboot OS")
-    print("  adl:     QMP loadvm → in-place memory restore (no reboot)")
+    print("  nbx:     QMP loadvm → in-place memory restore (no reboot)")
     print()
 
     osworld = bench_osworld_docker_reset(
         qcow2, args.rounds, args.memory, args.cpus)
-    adl = bench_adl_loadvm_reset(
+    nbx = bench_nbx_loadvm_reset(
         qcow2, args.rounds, args.memory, args.cpus)
 
-    speedup = osworld["median_ms"] / adl["median_ms"]
+    speedup = osworld["median_ms"] / nbx["median_ms"]
 
     print()
     print("=" * 60)
-    print(f"  {'':22} {'OSWorld Docker':>16} {'adl loadvm':>12} {'Speedup':>10}")
+    print(f"  {'':22} {'OSWorld Docker':>16} {'nbx loadvm':>12} {'Speedup':>10}")
     print(f"  {'-'*22} {'-'*16} {'-'*12} {'-'*10}")
     print(f"  {'Reset (median)':22} "
           f"{osworld['median_ms']/1000:>14.1f}s "
-          f"{adl['median_ms']/1000:>10.1f}s "
+          f"{nbx['median_ms']/1000:>10.1f}s "
           f"{speedup:>8.1f}x")
     print()
-    print(f"  savevm (one-time):  {adl['savevm_ms']/1000:.1f}s")
+    print(f"  savevm (one-time):  {nbx['savevm_ms']/1000:.1f}s")
     print()
 
     episodes = 1000
     os_h = osworld["median_ms"] * episodes / 3600000
-    adl_h = adl["median_ms"] * episodes / 3600000
+    nbx_h = nbx["median_ms"] * episodes / 3600000
     print(f"  RL training impact ({episodes} episodes):")
     print(f"    OSWorld Docker: {os_h:.1f}h on resets")
-    print(f"    adl loadvm:     {adl_h:.1f}h on resets")
-    print(f"    Saved:          {os_h - adl_h:.1f}h ({speedup:.0f}x)")
+    print(f"    nbx loadvm:     {nbx_h:.1f}h on resets")
+    print(f"    Saved:          {os_h - nbx_h:.1f}h ({speedup:.0f}x)")
     print()
     print("  Note: Speedup comes from the reset strategy (loadvm vs")
     print("  container restart), not from the sandbox layer itself.")
