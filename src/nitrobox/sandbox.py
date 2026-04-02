@@ -1328,11 +1328,15 @@ class Sandbox:
             return cls._cached_subuid_range
 
         if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
-            logger.debug(
-                "newuidmap/newgidmap not found. Falling back to root-only mapping."
+            raise SandboxInitError(
+                "newuidmap/newgidmap not found. These are required for full "
+                "UID mapping inside sandboxes (apt-get, su, and other programs "
+                "that switch users will fail without them).\n"
+                "Install with:\n"
+                "  Ubuntu/Debian: sudo apt-get install -y uidmap\n"
+                "  Fedora/RHEL:   sudo dnf install -y shadow-utils\n"
+                "  Arch:          sudo pacman -S shadow"
             )
-            cls._subuid_detected = True
-            return None
 
         import getpass
         try:
