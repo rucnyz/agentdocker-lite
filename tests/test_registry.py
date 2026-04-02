@@ -228,7 +228,7 @@ class TestGetConfigFromRegistry:
 
     def test_returns_none_on_failure(self):
         """Returns None when registry is unreachable."""
-        with patch("nitrobox._registry._get_token", side_effect=Exception("no network")):
+        with patch("nitrobox._registry._get_token", side_effect=OSError("no network")):
             result = get_config_from_registry("nonexistent:latest")
         assert result is None
 

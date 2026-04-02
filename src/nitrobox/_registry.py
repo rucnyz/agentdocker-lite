@@ -81,7 +81,7 @@ def _get_token(registry: str, repo: str) -> str | None:
             if not realm:
                 return None
             url = f"{realm.group(1)}?service={service.group(1) if service else ''}&scope=repository:{repo}:pull"
-        except Exception:
+        except (OSError, urllib.error.URLError):
             return None
 
     try:
@@ -89,7 +89,7 @@ def _get_token(registry: str, repo: str) -> str | None:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
             return data.get("token") or data.get("access_token")
-    except Exception as e:
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as e:
         logger.debug("Token request failed: %s", e)
         return None
 
@@ -186,7 +186,7 @@ def get_diff_ids_from_registry(image: str) -> list[str] | None:
         config = get_image_config_from_registry(registry, repo, manifest, token)
         rootfs = config.get("rootfs", {})
         return rootfs.get("diff_ids")
-    except Exception as e:
+    except (OSError, urllib.error.URLError, RuntimeError, KeyError) as e:
         logger.debug("Registry diff_ids failed for %s: %s", image, e)
         return None
 
@@ -275,6 +275,6 @@ def get_config_from_registry(image: str) -> dict | None:
             "working_dir": container_config.get("WorkingDir") or None,
             "exposed_ports": ports or None,
         }
-    except Exception as e:
+    except (OSError, urllib.error.URLError, RuntimeError, KeyError) as e:
         logger.debug("Registry config failed for %s: %s", image, e)
         return None

@@ -1316,7 +1316,7 @@ class Sandbox:
         import getpass
         try:
             username = getpass.getuser()
-        except Exception:
+        except (KeyError, OSError):
             cls._subuid_detected = True
             return None
 
