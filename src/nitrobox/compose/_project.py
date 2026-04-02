@@ -422,6 +422,11 @@ class ComposeProject:
         for vol in svc.volumes:
             parts = vol.split(":")
             if len(parts) < 2:
+                # Docker treats "/data" as "/data:/data"
+                if parts[0].startswith("/"):
+                    result.append(f"{parts[0]}:{parts[0]}")
+                else:
+                    logger.warning("Skipping volume with no target: %s", vol)
                 continue
 
             source = parts[0]
@@ -471,7 +476,8 @@ class ComposeProject:
         # seccomp: disabled if security_opt includes seccomp:unconfined
         # or if privileged
         seccomp = True
-        if svc.privileged or "seccomp:unconfined" in svc.security_opt:
+        security_opts_normalized = [s.replace(" ", "") for s in svc.security_opt]
+        if svc.privileged or "seccomp:unconfined" in security_opts_normalized:
             seccomp = False
 
         # Network namespace strategy:
@@ -584,8 +590,9 @@ class ComposeProject:
         for key, value in svc.sysctls.items():
             path = "/proc/sys/" + key.replace(".", "/")
             try:
+                import shlex
                 _, ec = sb.run(
-                    f"printf '%s' '{value}' > {path} 2>/dev/null",
+                    f"printf '%s' {shlex.quote(str(value))} > {path} 2>/dev/null",
                     timeout=5,
                 )
                 if ec != 0:

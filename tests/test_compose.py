@@ -486,6 +486,102 @@ class TestNewComposeFields:
         assert "app" in services
 
 
+    def test_security_opt_whitespace(self, tmp_path):
+        """security_opt with space after colon is still recognized."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                security_opt:
+                  - "seccomp: unconfined"
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "seccomp: unconfined" in services["app"].security_opt
+
+    def test_env_file_single(self, tmp_path):
+        """env_file loads variables from file."""
+        env_file = tmp_path / "test.env"
+        env_file.write_text("DB_HOST=localhost\nDB_PORT=5432\n# comment\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent(f"""\
+            services:
+              db:
+                image: postgres
+                env_file:
+                  - test.env
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["db"].environment["DB_HOST"] == "localhost"
+        assert services["db"].environment["DB_PORT"] == "5432"
+
+    def test_env_file_override(self, tmp_path):
+        """environment: overrides env_file values."""
+        env_file = tmp_path / "base.env"
+        env_file.write_text("KEY=from_file\n")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                env_file:
+                  - base.env
+                environment:
+                  KEY: from_inline
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].environment["KEY"] == "from_inline"
+
+    def test_env_file_quoted_values(self, tmp_path):
+        """env_file strips quotes around values."""
+        env_file = tmp_path / "quoted.env"
+        env_file.write_text('SINGLE=\'single\'\nDOUBLE="double"\n')
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                env_file:
+                  - quoted.env
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["app"].environment["SINGLE"] == "single"
+        assert services["app"].environment["DOUBLE"] == "double"
+
+    def test_volume_single_path(self, tmp_path):
+        """Single-path volume `/data` is treated as `/data:/data`."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: myapp
+                volumes:
+                  - /data
+                  - /var/log:/var/log
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert "/data" in services["app"].volumes
+        assert "/var/log:/var/log" in services["app"].volumes
+
+    def test_tmpfs_string_and_list(self, tmp_path):
+        """tmpfs as string and as list both work."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              str_form:
+                image: myapp
+                tmpfs: /run
+              list_form:
+                image: myapp
+                tmpfs:
+                  - /run
+                  - /tmp
+        """))
+        services, _ = _parse_compose(compose, {})
+        assert services["str_form"].tmpfs == ["/run"]
+        assert services["list_form"].tmpfs == ["/run", "/tmp"]
+
+
 # ------------------------------------------------------------------ #
 #  Topological sort                                                    #
 # ------------------------------------------------------------------ #
