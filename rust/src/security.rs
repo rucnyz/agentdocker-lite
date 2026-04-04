@@ -119,7 +119,8 @@ struct ArchConfig {
 static ARCH: ArchConfig = ArchConfig {
     audit_arch: AUDIT_ARCH_X86_64,
     blocked: &[
-        (101, "ptrace"),
+        // ptrace: allowed (Docker default allows it; many programs use
+        // PTRACE_TRACEME for anti-debug checks, gdb, strace, etc.)
         (165, "mount"),
         (166, "umount2"),
         (155, "pivot_root"),
@@ -161,7 +162,7 @@ static ARCH: ArchConfig = ArchConfig {
 static ARCH: ArchConfig = ArchConfig {
     audit_arch: AUDIT_ARCH_AARCH64,
     blocked: &[
-        (117, "ptrace"),
+        // ptrace: allowed (same as x86_64 — Docker compat)
         (40, "mount"),
         (39, "umount2"),
         (41, "pivot_root"),
