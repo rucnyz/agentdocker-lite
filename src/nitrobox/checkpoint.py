@@ -4,14 +4,13 @@ Provides full process-state snapshots (memory, registers, file descriptors)
 on top of the existing overlayfs filesystem snapshots.  Zero runtime overhead —
 CRIU only runs during save/restore operations.
 
-Uses CRIU's ``swrk`` (service-worker) RPC protocol over Unix sockets for
-reliable fd passing — the CLI mode does not support ``--inherit-fd``.
+Uses ``nitrobox-checkpoint-helper`` — a setuid binary installed by
+``nitrobox setup`` that runs CRIU with full root privileges.  The
+training script itself runs as a normal user.
 
 Requirements:
-    - CRIU >= 4.0 (vendored static binary included)
-    - Root or ``CAP_CHECKPOINT_RESTORE`` + ``CAP_SYS_PTRACE``
+    - ``nitrobox setup`` must have been run (installs helper + CRIU)
     - Kernel 5.9+ (for CAP_CHECKPOINT_RESTORE)
-    - ``protobuf`` Python package
 
 Usage:
     >>> from nitrobox import Sandbox, SandboxConfig
@@ -28,24 +27,13 @@ Usage:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
 import shutil
-import socket
-import struct
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-# Lazy-import protobuf to avoid hard dependency at module level.
-# The generated rpc_pb2 lives in _vendor/.
-from typing import Any
-
-# Protobuf-generated module with dynamic attributes — typed as Any to suppress
-# attribute access errors from type checkers.
-rpc: Any = __import__("nitrobox._vendor.criu_rpc_pb2", fromlist=["criu_rpc_pb2"])
 
 if TYPE_CHECKING:
     from nitrobox.sandbox import Sandbox
@@ -58,107 +46,34 @@ _META_FILE = "meta.json"
 
 
 # ------------------------------------------------------------------ #
-#  CRIU binary discovery                                               #
+#  Binary discovery                                                    #
 # ------------------------------------------------------------------ #
 
+def _find_helper() -> str:
+    """Find the nitrobox-checkpoint-helper binary."""
+    # 1. System path
+    system = shutil.which("nitrobox-checkpoint-helper")
+    if system:
+        return system
+    # 2. Next to vendored CRIU
+    vendored = Path(__file__).parent / "_vendor" / "nitrobox-checkpoint-helper"
+    if vendored.is_file() and os.access(str(vendored), os.X_OK):
+        return str(vendored)
+    raise FileNotFoundError(
+        "nitrobox-checkpoint-helper not found.\n"
+        "Run 'nitrobox setup' to install it."
+    )
+
+
 def _find_criu() -> str:
-    """Find the criu binary: vendored first, then system PATH."""
+    """Find the criu binary (for check_available only)."""
     vendored = Path(__file__).parent / "_vendor" / "criu"
     if vendored.is_file() and os.access(str(vendored), os.X_OK):
         return str(vendored)
     system = shutil.which("criu")
     if system:
         return system
-    raise FileNotFoundError(
-        "criu not found. Install it:\n"
-        "  Arch:   pacman -S criu\n"
-        "  Ubuntu: apt install criu\n"
-        "  Fedora: dnf install criu"
-    )
-
-
-# ------------------------------------------------------------------ #
-#  CRIU RPC client (minimal reimplementation of pycriu)                #
-# ------------------------------------------------------------------ #
-
-class _CriuRPC:
-    """Minimal CRIU RPC client using ``criu swrk`` protocol.
-
-    Communicates via a Unix SEQPACKET socketpair + protobuf,
-    following the same protocol as pycriu / go-criu / libcriu.
-    """
-
-    def __init__(self, binary: str):
-        self._binary = binary
-
-    def _call(self, req: Any) -> Any:
-        """Fork+exec ``criu swrk <fd>``, send request, receive response."""
-        # Create socketpair: css[0] goes to child, css[1] stays in parent.
-        css = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-
-        # Child end: clear FD_CLOEXEC so it survives exec.
-        flags = fcntl.fcntl(css[0], fcntl.F_GETFD)
-        fcntl.fcntl(css[0], fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
-        # Parent end: set FD_CLOEXEC.
-        flags = fcntl.fcntl(css[1], fcntl.F_GETFD)
-        fcntl.fcntl(css[1], fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
-
-        pid = os.fork()
-        if pid == 0:
-            # Child: send our PID then exec criu swrk.
-            try:
-                css[0].send(struct.pack("i", os.getpid()))
-                os.execv(
-                    self._binary,
-                    [self._binary, "swrk", str(css[0].fileno())],
-                )
-            except Exception:
-                pass
-            os._exit(1)
-
-        # Parent: close child end, read child PID.
-        css[0].close()
-        sk = css[1]
-
-        try:
-            struct.unpack("i", sk.recv(4))  # read child PID (required by protocol)
-
-            # Send protobuf request.
-            sk.send(req.SerializeToString())
-
-            # Receive response (peek for size first).
-            peek = sk.recv(1, socket.MSG_TRUNC | socket.MSG_PEEK)
-            buf = sk.recv(len(peek))
-
-            resp = rpc.criu_resp()
-            resp.ParseFromString(buf)
-        finally:
-            sk.close()
-            os.waitpid(pid, 0)
-
-        return resp
-
-    def dump(self, opts: Any) -> Any:
-        req = rpc.criu_req()
-        req.type = rpc.DUMP
-        req.opts.CopyFrom(opts)
-        return self._call(req)
-
-    def restore(self, opts: Any) -> Any:
-        req = rpc.criu_req()
-        req.type = rpc.RESTORE
-        req.opts.CopyFrom(opts)
-        return self._call(req)
-
-    def check(self) -> bool:
-        req = rpc.criu_req()
-        req.type = rpc.CHECK
-        req.opts.CopyFrom(rpc.criu_opts(images_dir_fd=-1))
-        try:
-            resp = self._call(req)
-            return resp.success
-        except Exception:
-            return False
+    raise FileNotFoundError("criu not found")
 
 
 # ------------------------------------------------------------------ #
@@ -166,11 +81,7 @@ class _CriuRPC:
 # ------------------------------------------------------------------ #
 
 def _get_pipe_fds(pid: int) -> list[str]:
-    """Read stdin/stdout/stderr link targets from /proc/<pid>/fd.
-
-    Returns a list of 3 strings like ``["pipe:[12345]", ...]``.
-    Following runc's ``getPipeFds`` — only fds 0, 1, 2.
-    """
+    """Read stdin/stdout/stderr link targets from /proc/<pid>/fd."""
     result: list[str] = ["", "", ""]
     for i in range(3):
         try:
@@ -198,7 +109,7 @@ def _get_all_pipe_inodes(pid: int) -> dict[int, int]:
 
 
 def _find_init_pid(shell_pid: int) -> int:
-    """Find PID 1 inside the namespace (the bash process)."""
+    """Find the bash process inside the namespace."""
     try:
         children = Path(
             f"/proc/{shell_pid}/task/{shell_pid}/children"
@@ -217,29 +128,22 @@ def _find_init_pid(shell_pid: int) -> int:
 class CheckpointManager:
     """Manages CRIU checkpoint/restore for a sandbox instance.
 
-    Args:
-        sandbox: A running Sandbox instance (must be rootful mode).
-        criu_binary: Path to criu binary. Auto-detected if None.
+    Uses the setuid ``nitrobox-checkpoint-helper`` binary for full
+    rootful CRIU capability without requiring sudo in the calling process.
+
+    Run ``nitrobox setup`` to install the helper.
     """
 
     def __init__(
         self,
         sandbox: Sandbox,
-        criu_binary: str | None = None,
+        helper_binary: str | None = None,
     ):
         self._sandbox = sandbox
-        self._criu_path = criu_binary or _find_criu()
-        self._rpc = _CriuRPC(self._criu_path)
+        self._helper = helper_binary or _find_helper()
 
-        if os.geteuid() != 0:
-            raise PermissionError(
-                "CheckpointManager requires root "
-                "(CRIU needs CAP_CHECKPOINT_RESTORE + CAP_SYS_PTRACE)"
-            )
-
-        # Become a subreaper so CRIU-restored processes (whose parent
-        # is the exited criu swrk) get reparented to us instead of
-        # init.  This lets waitpid work and avoids zombies.
+        # Become a subreaper so CRIU-restored processes get reparented
+        # to us instead of init.
         import ctypes
         import ctypes.util
         PR_SET_CHILD_SUBREAPER = 36
@@ -282,7 +186,7 @@ class CheckpointManager:
         assert shell_pid is not None, "shell has no pid"
         init_pid = _find_init_pid(shell_pid)
 
-        # 3. Save pipe descriptors (runc approach: readlink fd 0/1/2).
+        # 3. Save pipe descriptors.
         pipe_fds = _get_pipe_fds(init_pid)
         all_pipe_inodes = _get_all_pipe_inodes(init_pid)
         signal_fd = shell._signal_fd
@@ -291,69 +195,54 @@ class CheckpointManager:
             "shell_pid": shell_pid,
             "init_pid": init_pid,
             "signal_fd": signal_fd,
-            "pipe_fds": pipe_fds,  # ["pipe:[X]", "pipe:[Y]", "pipe:[Y]"]
+            "pipe_fds": pipe_fds,
             "all_pipe_inodes": {str(k): v for k, v in all_pipe_inodes.items()},
             "tty": self._sandbox._config.tty,
             "working_dir": self._sandbox._config.working_dir,
         }
-        # Save pipe_fds as descriptors.json (runc convention).
         (criu_dir / "descriptors.json").write_text(json.dumps(pipe_fds))
         (ckpt_dir / _META_FILE).write_text(json.dumps(meta, indent=2))
 
-        # 4. Build CRIU dump options.
+        # 4. Build external mounts and pipes.
         rootfs = self._sandbox._rootfs
-        opts = rpc.criu_opts()
-        opts.images_dir_fd = os.open(str(criu_dir), os.O_DIRECTORY)
-        opts.pid = init_pid
-        opts.root = str(rootfs)
-        opts.log_file = "dump.log"
-        opts.log_level = 4
-        opts.shell_job = True
-        opts.tcp_established = True
-        opts.evasive_devices = True
-        opts.file_locks = True
-        opts.ext_unix_sk = True
-        opts.ghost_limit = 10 * 1024 * 1024
-        opts.orphan_pts_master = True
-
-        if leave_running:
-            opts.leave_running = True
-        if track_mem:
-            opts.track_mem = True
-
-        # External mounts: /proc, /dev, and all user-configured volumes.
-        # Following runc: register every non-rootfs mount as external so
-        # CRIU doesn't try to dump/restore them (they're managed by us).
         ext_mounts = ["/proc", "/dev"]
         for bind_path in getattr(self._sandbox, "_bind_mounts", []):
-            # Convert host path to container-relative path.
             try:
                 rel = "/" + str(bind_path.relative_to(rootfs))
             except ValueError:
                 rel = str(bind_path)
             ext_mounts.append(rel)
 
+        external_pipes = [f"pipe:[{inode}]" for _, inode in all_pipe_inodes.items()]
+
+        # 5. Run helper dump.
+        #    Helper enters sandbox's namespaces (as root via setuid),
+        #    Helper enters sandbox's mount namespace (as root via setuid),
+        #    runs CRIU from inside — same view as runc/Docker.
+        cmd = [
+            self._helper, "dump",
+            "--ns-pid", str(init_pid),
+            "--tree", str(init_pid),
+            "--images-dir", str(criu_dir),
+            "--shell-job",
+        ]
+        if leave_running:
+            cmd.append("--leave-running")
+        if track_mem:
+            cmd.append("--track-mem")
         for mnt in ext_mounts:
-            ext = opts.ext_mnt.add()
-            ext.key = mnt
-            ext.val = mnt
+            cmd.extend(["--ext-mount-map", f"{mnt}:{mnt}"])
+        for pipe in external_pipes:
+            cmd.extend(["--external", pipe])
 
-        # External pipes (all pipe fds).
-        for _, inode in all_pipe_inodes.items():
-            opts.external.append(f"pipe:[{inode}]")
-
-        # 5. Run CRIU dump.
         logger.info("CRIU dump: pid=%d dir=%s", init_pid, criu_dir)
-        try:
-            resp = self._rpc.dump(opts)
-        finally:
-            os.close(opts.images_dir_fd)
-
-        if not resp.success:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
             log_file = criu_dir / "dump.log"
             criu_log = log_file.read_text()[-2000:] if log_file.exists() else ""
             raise RuntimeError(
-                f"CRIU dump failed (errno={resp.cr_errno}):\n"
+                f"CRIU dump failed (exit={result.returncode}):\n"
+                f"stderr: {result.stderr.strip()}\n"
                 f"log (tail): {criu_log}"
             )
 
@@ -387,43 +276,59 @@ class CheckpointManager:
         # 1. Kill current shell.
         shell.kill()
 
-        # 2. Restore filesystem.
-        #    Replace upper layer, then remount overlayfs to flush kernel
-        #    inode cache (overlayfs doesn't auto-reflect upper dir changes).
+        # 2. Restore filesystem (replace overlay upper dir).
         upper = getattr(self._sandbox, "_upper_dir", None)
         if upper:
             rootfs = self._sandbox._rootfs
-            # Unmount overlayfs.
             from nitrobox._core import py_umount
             try:
                 py_umount(str(rootfs))
             except OSError:
                 pass
-            # Replace upper layer.
             if upper.exists():
-                shutil.rmtree(upper)
+                if getattr(self._sandbox, "_userns", False):
+                    from nitrobox.image.layers import rmtree_mapped
+                    rmtree_mapped(upper)
+                else:
+                    shutil.rmtree(upper)
             shutil.copytree(str(fs_dir), str(upper))
-            # Clear work dir.
             work = getattr(self._sandbox, "_work_dir", None)
             if work and work.exists():
-                shutil.rmtree(work)
-                work.mkdir(parents=True)
-            # Remount overlayfs.
-            lowerdir_spec = getattr(self._sandbox, "_lowerdir_spec", None)
-            if not lowerdir_spec:
-                base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
-                lowerdir_spec = str(base_rootfs) if base_rootfs else None
-            if lowerdir_spec:
-                from nitrobox._core import py_mount_overlay
+                if getattr(self._sandbox, "_userns", False):
+                    from nitrobox.image.layers import rmtree_mapped
+                    rmtree_mapped(work)
+                else:
+                    shutil.rmtree(work)
+                work.mkdir(parents=True, exist_ok=True)
 
+        # 3. Mount overlay (helper does it as root).
+        lowerdir_spec = getattr(self._sandbox, "_lowerdir_spec", None)
+        if not lowerdir_spec:
+            base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
+            lowerdir_spec = str(base_rootfs) if base_rootfs else None
+        if lowerdir_spec and upper:
+            rootfs = self._sandbox._rootfs
+            work = getattr(self._sandbox, "_work_dir", None)
+            from nitrobox._core import py_mount_overlay
+            try:
                 py_mount_overlay(
                     lowerdir_spec=str(lowerdir_spec),
                     upper_dir=str(upper),
                     work_dir=str(work),
                     target=str(rootfs),
                 )
+            except OSError:
+                subprocess.run(
+                    [self._helper, "mount-overlay",
+                     "--lowerdir", str(lowerdir_spec),
+                     "--upper", str(upper),
+                     "--work", str(work),
+                     "--target", str(rootfs)],
+                    check=True, capture_output=True,
+                )
+            self._sandbox._overlay_mounted = True
 
-        # 3. Create new pipes for the restored process.
+        # 4. Create new pipes for the restored process.
         signal_r, signal_w = os.pipe()
 
         if use_tty:
@@ -440,7 +345,6 @@ class CheckpointManager:
             stdout_r, stdout_w = os.pipe()
             stderr_w = os.dup(stdout_w)
 
-        # Make all fds inheritable so criu swrk's fork can see them.
         new_fds = [signal_w]
         if use_tty:
             new_fds.append(slave_fd)
@@ -449,93 +353,55 @@ class CheckpointManager:
         for fd in new_fds:
             os.set_inheritable(fd, True)
 
-        # 4. Build CRIU restore options.
-        #    The "criu-root" bind mount trick from runc: CRIU requires
-        #    --root to be a mount point whose parent is NOT overmounted.
-        #    We bind-mount the rootfs to a temporary directory to
-        #    guarantee this invariant regardless of the host layout.
-        rootfs = self._sandbox._rootfs
-        env_dir = getattr(self._sandbox, "_env_dir", None)
-        criu_root = Path(str(env_dir or rootfs.parent)) / "criu-root"
-        criu_root.mkdir(exist_ok=True)
-        from nitrobox._core import py_rbind_mount
-        py_rbind_mount(str(rootfs), str(criu_root))
-        opts = rpc.criu_opts()
-        opts.images_dir_fd = os.open(str(criu_dir), os.O_DIRECTORY)
-        opts.root = str(criu_root)
-        opts.log_file = "restore.log"
-        opts.log_level = 4
-        opts.shell_job = True
-        opts.tcp_established = True
-        opts.evasive_devices = True
-        opts.file_locks = True
-        opts.ext_unix_sk = True
-        opts.rst_sibling = True
-        opts.orphan_pts_master = True
-
-        # External mounts (must match dump registration).
-        ext_mounts = ["/proc", "/dev"]
-        for bind_path in getattr(self._sandbox, "_bind_mounts", []):
-            try:
-                rel = "/" + str(bind_path.relative_to(rootfs))
-            except ValueError:
-                rel = str(bind_path)
-            ext_mounts.append(rel)
-
-        for mnt in ext_mounts:
-            ext = opts.ext_mnt.add()
-            ext.key = mnt
-            ext.val = mnt
-
-        # Inherit fds: reconnect pipes.
-        # Signal pipe (find its inode from all_pipe_inodes).
-        signal_inode_key = None
+        # 5. Build inherit-fd args.
+        inherit_fds: list[tuple[str, int]] = []
         for fd_str, inode in all_pipe_inodes.items():
             if int(fd_str) == signal_fd_num:
-                signal_inode_key = f"pipe:[{inode}]"
+                inherit_fds.append((f"pipe:[{inode}]", signal_w))
                 break
-        if signal_inode_key:
-            inhfd = opts.inherit_fd.add()
-            inhfd.key = signal_inode_key
-            inhfd.fd = signal_w
-
-        # stdin/stdout/stderr pipes (runc approach: use pipe_fds list).
         if use_tty:
-            for i, desc in enumerate(pipe_fds):
+            for desc in pipe_fds:
                 if desc and "pipe:" in desc:
-                    inhfd = opts.inherit_fd.add()
-                    inhfd.key = desc
-                    inhfd.fd = slave_fd
+                    inherit_fds.append((desc, slave_fd))
         else:
-            # Each inherit_fd entry must use a UNIQUE fd because
-            # CRIU closes the fd after consuming it.
             fd_map = {0: stdin_r, 1: stdout_w, 2: stderr_w}
             for i, desc in enumerate(pipe_fds):
                 if desc and "pipe:" in desc and i in fd_map:
-                    inhfd = opts.inherit_fd.add()
-                    inhfd.key = desc
-                    inhfd.fd = fd_map[i]
+                    inherit_fds.append((desc, fd_map[i]))
 
-        # 5. Run CRIU restore.
-        logger.info("CRIU restore: dir=%s", criu_dir)
         all_cleanup_fds = [
             signal_r, signal_w,
             *(([master_fd, slave_fd] if use_tty else
                [stdin_r, stdin_w, stdout_r, stdout_w, stderr_w])),
         ]
+        all_pass_fds = tuple(fd for fd in new_fds if fd >= 0)
 
-        def _cleanup_criu_root():
-            subprocess.run(
-                ["umount", "-l", str(criu_root)],
-                capture_output=True,
-            )
-            try:
-                criu_root.rmdir()
-            except OSError:
-                pass
+        # 6. Run helper restore.
+        #    Helper runs CRIU from init namespace with full root.
+        #    CRIU recreates all namespaces from checkpoint images.
+        #    --root points to the overlay-mounted rootfs.
+        rootfs = self._sandbox._rootfs
+        pidfile = criu_dir / "restore.pid"
+        cmd = [
+            self._helper, "restore",
+            "--ns-pid", str(os.getpid()),  # for ownership check only
+            "--images-dir", str(criu_dir),
+            "--root", str(rootfs),
+            "--shell-job",
+            "--restore-sibling",
+            "--restore-detached",
+            "--mntns-compat-mode",
+            "--pidfile", str(pidfile),
+        ]
+        for key, fd in inherit_fds:
+            cmd.extend(["--inherit-fd", f"fd[{fd}]:{key}"])
 
+        logger.info("CRIU restore: dir=%s", criu_dir)
         try:
-            resp = self._rpc.restore(opts)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                close_fds=False, pass_fds=all_pass_fds,
+            )
         except Exception:
             for fd in all_cleanup_fds:
                 if fd >= 0:
@@ -543,15 +409,9 @@ class CheckpointManager:
                         os.close(fd)
                     except OSError:
                         pass
-            os.close(opts.images_dir_fd)
-            _cleanup_criu_root()
             raise
-        finally:
-            os.close(opts.images_dir_fd)
 
-        _cleanup_criu_root()
-
-        if not resp.success:
+        if result.returncode != 0:
             for fd in all_cleanup_fds:
                 if fd >= 0:
                     try:
@@ -561,11 +421,13 @@ class CheckpointManager:
             log_file = criu_dir / "restore.log"
             criu_log = log_file.read_text()[-2000:] if log_file.exists() else ""
             raise RuntimeError(
-                f"CRIU restore failed (errno={resp.cr_errno}):\n"
+                f"CRIU restore failed (exit={result.returncode}):\n"
+                f"stderr: {result.stderr.strip()}\n"
                 f"log (tail): {criu_log}"
             )
 
-        restored_pid = resp.restore.pid
+        restored_pid = int(pidfile.read_text().strip())
+        shell.kill()
 
         # 6. Close fds passed to the restored process.
         os.close(signal_w)
@@ -597,97 +459,10 @@ class CheckpointManager:
 
     @staticmethod
     def check_available() -> bool:
-        """Check if CRIU is installed and the kernel supports it."""
+        """Check if checkpoint helper and CRIU are available."""
         try:
-            criu = _find_criu()
-            rpc_client = _CriuRPC(criu)
-            return rpc_client.check()
-        except (FileNotFoundError, Exception):
+            _find_helper()
+            _find_criu()
+            return True
+        except FileNotFoundError:
             return False
-
-
-# ------------------------------------------------------------------ #
-#  Popen-like wrapper for CRIU-restored processes                      #
-# ------------------------------------------------------------------ #
-
-class _RestoredProcess:
-    """Minimal Popen-like wrapper for a CRIU-restored process.
-
-    Provides the interface that _PersistentShell needs:
-    .pid, .poll(), .stdin, .stdout, .kill(), .wait().
-    """
-
-    def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
-        self.pid = pid
-        self._dead = False
-        from nitrobox._core import py_pidfd_open
-        self._pidfd: int | None = py_pidfd_open(pid)
-        self.stdin = os.fdopen(stdin_fd, "wb", buffering=0) if stdin_fd >= 0 else None
-        self.stdout = os.fdopen(stdout_fd, "rb", buffering=0) if stdout_fd >= 0 else None
-
-    def poll(self) -> int | None:
-        if self._dead:
-            return -1
-        # With subreaper, the restored process is our adopted child,
-        # so waitpid works normally.
-        try:
-            pid, status = os.waitpid(self.pid, os.WNOHANG)
-            if pid == 0:
-                return None
-            self._dead = True
-            return os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
-        except ChildProcessError:
-            # Not our child (subreaper not set or race) — fallback to pidfd.
-            if self._pidfd is not None:
-                from nitrobox._core import py_pidfd_is_alive
-                if not py_pidfd_is_alive(self._pidfd):
-                    self._dead = True
-                    return -1
-                return None
-            if not Path(f"/proc/{self.pid}").exists():
-                self._dead = True
-                return -1
-            return None
-        # Fallback to waitpid / /proc check.
-        try:
-            pid, status = os.waitpid(self.pid, os.WNOHANG)
-            if pid == 0:
-                return None
-            return os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
-        except ChildProcessError:
-            if Path(f"/proc/{self.pid}").exists():
-                return None
-            return -1
-
-    def kill(self) -> None:
-        import signal
-        # Try kill single process first (restored process may not be
-        # a process group leader, so killpg can fail).
-        try:
-            os.kill(self.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            os.killpg(self.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        self._dead = True
-        if self._pidfd is not None:
-            try:
-                os.close(self._pidfd)
-            except OSError:
-                pass
-            self._pidfd = None
-
-    def wait(self, timeout: float | None = None) -> int:
-        import time
-        deadline = time.monotonic() + timeout if timeout is not None else None
-        while True:
-            ret = self.poll()
-            if ret is not None:
-                return ret
-            if deadline is not None and time.monotonic() > deadline:
-                raise subprocess.TimeoutExpired(
-                    cmd="criu-restored", timeout=timeout or 0,
-                )
-            time.sleep(0.01)

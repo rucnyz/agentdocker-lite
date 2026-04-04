@@ -36,12 +36,17 @@ jobs:
         run: |
           sudo sysctl -w kernel.unprivileged_userns_clone=1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
-      - run: python -m pytest tests/test_security.py -v -k "UserNamespace"
-      - run: python -m pytest tests/test_compose.py -v
-      - run: python -m pytest tests/test_cli.py -v
-      - run: python -m pytest tests/test_registry.py -v
-      - run: python -m pytest tests/test_whiteout.py -v
-      - run: python -m pytest tests/test_rust_core.py -v
+      - run: python -m pytest tests/test_security.py -v -k "UserNamespace" --cov=nitrobox --cov-report=xml:coverage-rootless-security.xml
+      - run: python -m pytest tests/test_compose.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-compose.xml
+      - run: python -m pytest tests/test_cli.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-cli.xml
+      - run: python -m pytest tests/test_registry.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-registry.xml
+      - run: python -m pytest tests/test_whiteout.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-whiteout.xml
+      - run: python -m pytest tests/test_rust_core.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless.xml
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.13'
+        with:
+          name: coverage-rootless
+          path: coverage-rootless.xml
 
   root:
     name: Root (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -63,10 +68,31 @@ jobs:
           allow-prereleases: true
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: sudo -E $(which python) -m pytest tests/test_sandbox.py tests/test_security.py -v -k "not UserNamespace"
-      - run: sudo -E $(which python) -m pytest tests/test_checkpoint.py -v
-      - run: sudo -E $(which python) -m pytest tests/test_rust_core.py -v
-      - run: sudo -E $(which python) -m pytest tests/test_whiteout.py -v
+      - run: sudo -E $(which python) -m pytest tests/test_sandbox.py tests/test_security.py -v -k "not UserNamespace" --cov=nitrobox --cov-report=xml:coverage-root-sandbox.xml
+      - run: sudo -E $(which python) -m pytest tests/test_checkpoint.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-root-checkpoint.xml
+      - run: sudo -E $(which python) -m pytest tests/test_rust_core.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-root-rustcore.xml
+      - run: sudo -E $(which python) -m pytest tests/test_whiteout.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-root.xml
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.13'
+        with:
+          name: coverage-root
+          path: coverage-root.xml
+
+  coverage:
+    name: Upload coverage
+    needs: [rootless, root]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - uses: codecov/codecov-action@v5
+        with:
+          files: coverage-rootless.xml,coverage-root.xml
+          fail_ci_if_error: false
 
   lint:
     name: Lint

@@ -29,37 +29,21 @@ from nitrobox.compose._project import _HealthMonitor
 
 
 class TestSubstitute:
-    def test_simple_var(self):
-        assert _substitute("${FOO}", {"FOO": "bar"}) == "bar"
-
-    def test_var_with_default(self):
-        assert _substitute("${FOO:-fallback}", {}) == "fallback"
-
-    def test_var_overrides_default(self):
-        assert _substitute("${FOO:-fallback}", {"FOO": "bar"}) == "bar"
-
-    def test_dollar_escape(self):
-        assert _substitute("$$HOME", {}) == "$HOME"
-
-    def test_mixed(self):
-        result = _substitute(
-            "http://127.0.0.1:${PORT:-8080}/api",
-            {"PORT": "9090"},
-        )
-        assert result == "http://127.0.0.1:9090/api"
-
-    def test_multiple_vars(self):
-        result = _substitute(
-            "${HOST}:${PORT:-80}",
-            {"HOST": "localhost"},
-        )
-        assert result == "localhost:80"
-
-    def test_unset_var_empty(self):
-        assert _substitute("${MISSING}", {}) == ""
-
-    def test_empty_default(self):
-        assert _substitute("${VAR:-}", {}) == ""
+    @pytest.mark.parametrize(
+        "template, env, expected",
+        [
+            pytest.param("${FOO}", {"FOO": "bar"}, "bar", id="simple_var"),
+            pytest.param("${FOO:-fallback}", {}, "fallback", id="var_with_default"),
+            pytest.param("${FOO:-fallback}", {"FOO": "bar"}, "bar", id="var_overrides_default"),
+            pytest.param("$$HOME", {}, "$HOME", id="dollar_escape"),
+            pytest.param("http://127.0.0.1:${PORT:-8080}/api", {"PORT": "9090"}, "http://127.0.0.1:9090/api", id="mixed"),
+            pytest.param("${HOST}:${PORT:-80}", {"HOST": "localhost"}, "localhost:80", id="multiple_vars"),
+            pytest.param("${MISSING}", {}, "", id="unset_var_empty"),
+            pytest.param("${VAR:-}", {}, "", id="empty_default"),
+        ],
+    )
+    def test_substitute(self, template, env, expected):
+        assert _substitute(template, env) == expected
 
 
 # ------------------------------------------------------------------ #
@@ -438,54 +422,26 @@ class TestNewComposeFields:
             "net.core.somaxconn": "1024",
         }
 
-    def test_init_no_error(self, tmp_path):
-        """init: true should not raise ValueError."""
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            pytest.param("init", "true", id="init"),
+            pytest.param("user", '"1000:1000"', id="user"),
+            pytest.param("pid", '"host"', id="pid"),
+            pytest.param("ipc", '"host"', id="ipc"),
+        ],
+    )
+    def test_field_no_error(self, tmp_path, field, value):
+        """Warn-ignored field should not raise ValueError."""
         compose = tmp_path / "docker-compose.yml"
-        compose.write_text(textwrap.dedent("""\
+        compose.write_text(textwrap.dedent(f"""\
             services:
               app:
                 image: myapp
-                init: true
+                {field}: {value}
         """))
         services, _ = _parse_compose(compose, {})
         assert "app" in services
-
-    def test_user_no_error(self, tmp_path):
-        """user field should not raise ValueError."""
-        compose = tmp_path / "docker-compose.yml"
-        compose.write_text(textwrap.dedent("""\
-            services:
-              app:
-                image: myapp
-                user: "1000:1000"
-        """))
-        services, _ = _parse_compose(compose, {})
-        assert "app" in services
-
-    def test_pid_no_error(self, tmp_path):
-        """pid field should not raise ValueError."""
-        compose = tmp_path / "docker-compose.yml"
-        compose.write_text(textwrap.dedent("""\
-            services:
-              app:
-                image: myapp
-                pid: "host"
-        """))
-        services, _ = _parse_compose(compose, {})
-        assert "app" in services
-
-    def test_ipc_no_error(self, tmp_path):
-        """ipc field should not raise ValueError."""
-        compose = tmp_path / "docker-compose.yml"
-        compose.write_text(textwrap.dedent("""\
-            services:
-              app:
-                image: myapp
-                ipc: "host"
-        """))
-        services, _ = _parse_compose(compose, {})
-        assert "app" in services
-
 
     def test_security_opt_whitespace(self, tmp_path):
         """security_opt with space after colon is still recognized."""
@@ -786,6 +742,66 @@ class TestDeployLimits:
         assert services["main"].image == "myimg"
         assert services["main"].cpus == "1"
         assert services["main"].mem_limit == "1024M"
+
+
+# ------------------------------------------------------------------ #
+#  Warn-ignored keys                                                   #
+# ------------------------------------------------------------------ #
+
+
+class TestWarnIgnoredKeys:
+    """Fields like ``init``, ``user``, ``pid``, ``ipc`` should be accepted
+    with a warning, not silently dropped or rejected."""
+
+    def test_warn_on_ignored_keys_logs(self, tmp_path, caplog):
+        import logging as _logging
+
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+                user: "1000"
+                init: true
+                pid: host
+                ipc: host
+        """))
+        with caplog.at_level(_logging.WARNING, logger="nitrobox.compose._parse"):
+            services, _ = _parse_compose(f, {})
+        assert "ignored" in caplog.text.lower()
+        assert "init" in caplog.text
+        assert "user" in caplog.text
+
+    def test_unsupported_field_still_raises(self, tmp_path):
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+                totally_fake_field: yes
+        """))
+        with pytest.raises(ValueError, match="unsupported compose fields"):
+            _parse_compose(f, {})
+
+
+# ------------------------------------------------------------------ #
+#  network_mode: none                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestNetworkModeNone:
+    """Parsing of network_mode: none."""
+
+    def test_parse_network_mode_none(self, tmp_path):
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+                network_mode: none
+        """))
+        services, _ = _parse_compose(f, {})
+        assert services["main"].network_mode == "none"
 
 
 # ------------------------------------------------------------------ #
@@ -1609,6 +1625,57 @@ class TestComposeProject:
             # Verify the service is actually healthy
             _, ec = proj.services["app"].run("test -f /tmp/ready")
             assert ec == 0
+        finally:
+            proj.down()
+
+
+# ------------------------------------------------------------------ #
+#  network_mode: none (integration)                                    #
+# ------------------------------------------------------------------ #
+
+
+class TestNetworkModeNoneIntegration:
+    """network_mode: none must isolate networking (loopback only)."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+    def test_network_mode_none_no_internet(self, tmp_path, shared_cache_dir):
+        """Sandbox with network_mode: none cannot reach external hosts."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu:22.04
+                network_mode: none
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-net-none",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            sb = proj.services["main"]
+
+            # Loopback should work
+            out, ec = sb.run("echo ok")
+            assert ec == 0
+
+            # External connectivity should fail
+            _, ec = sb.run(
+                "python3 -c 'import socket; socket.create_connection((\"1.1.1.1\", 80), timeout=2)' 2>&1",
+                timeout=10,
+            )
+            assert ec != 0, "network_mode: none should block external connections"
         finally:
             proj.down()
 

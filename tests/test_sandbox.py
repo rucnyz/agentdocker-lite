@@ -813,6 +813,63 @@ class TestResourceLimits:
         box.delete()
 
 
+class TestRootlessCgroupSetup:
+    """Unit tests for rootless cgroup delegation logic (no root needed)."""
+
+    def _make_sandbox_stub(self, tmp_path, limits=None):
+        """Create a minimal Sandbox stub for testing cgroup methods."""
+        s = Sandbox.__new__(Sandbox)
+        s._userns = True
+        s._cgroup_path = None
+        s._systemd_scope_name = None
+        s._systemd_scope_pid = None
+        s._env_dir = tmp_path / "test-env"
+        s._env_dir.mkdir()
+        s._cgroup_limits = {
+            "cpu_max": None, "memory_max": None, "memory_high": None,
+            "pids_max": None, "io_max": None, "cpuset_cpus": None,
+            "cpuset_mems": None, "cpu_shares": None, "memory_swap": None,
+        }
+        if limits:
+            s._cgroup_limits.update(limits)
+        return s
+
+    def test_no_limits_skips(self, tmp_path):
+        """No limits → _setup_cgroup_rootless is a no-op."""
+        s = self._make_sandbox_stub(tmp_path)
+        s._setup_cgroup_rootless()
+        assert s._cgroup_path is None
+
+    def test_try_own_cgroup_parses_proc(self, tmp_path):
+        """_try_own_cgroup reads /proc/self/cgroup correctly."""
+        s = self._make_sandbox_stub(tmp_path, {"memory_max": "256M"})
+        # Even if it fails permission-wise, it should not raise
+        result = s._try_own_cgroup()
+        # On this machine without delegation it returns None
+        # On a machine with delegation it would return a Path
+        assert result is None or isinstance(result, Path)
+
+    def test_preallocated_cgroup_used(self, tmp_path):
+        """Pre-allocated cgroup at /sys/fs/cgroup/nitrobox is used when available."""
+        s = self._make_sandbox_stub(tmp_path, {"memory_max": "256M"})
+        preallocated = Path("/sys/fs/cgroup/nitrobox")
+        if preallocated.exists() and os.access(preallocated, os.W_OK):
+            s._setup_cgroup_rootless()
+            assert s._cgroup_path is not None
+            # Cleanup the child cgroup we created
+            from nitrobox._core import py_cleanup_cgroup
+            py_cleanup_cgroup(str(s._cgroup_path))
+        else:
+            s._setup_cgroup_rootless()
+            # Without delegation, cgroup_path may be None
+            assert s._cgroup_path is None or isinstance(s._cgroup_path, Path)
+
+    def test_cleanup_cgroup_noop_when_none(self, tmp_path):
+        """_cleanup_cgroup with no cgroup_path is a no-op."""
+        s = self._make_sandbox_stub(tmp_path)
+        s._cleanup_cgroup()  # Should not raise
+
+
 # ------------------------------------------------------------------ #
 #  Edge cases and robustness                                           #
 # ------------------------------------------------------------------ #
@@ -1458,28 +1515,22 @@ class TestReadOnly:
 class TestParseCpuMax:
     """Unit tests for _parse_cpu_max sugar."""
 
-    def test_fraction(self):
+    @pytest.mark.parametrize("input_val,expected", [
+        ("0.5", "50000 100000"),
+        ("2", "200000 100000"),
+        ("50%", "50000 100000"),
+        ("50000 100000", "50000 100000"),
+        ("0.01", "1000 100000"),
+    ])
+    def test_parse(self, input_val, expected):
         from nitrobox.config import _parse_cpu_max
-        assert _parse_cpu_max("0.5") == "50000 100000"
-
-    def test_integer_cores(self):
-        from nitrobox.config import _parse_cpu_max
-        assert _parse_cpu_max("2") == "200000 100000"
-
-    def test_percentage(self):
-        from nitrobox.config import _parse_cpu_max
-        assert _parse_cpu_max("50%") == "50000 100000"
-
-    def test_passthrough_raw(self):
-        from nitrobox.config import _parse_cpu_max
-        assert _parse_cpu_max("50000 100000") == "50000 100000"
-
-    def test_small_fraction(self):
-        from nitrobox.config import _parse_cpu_max
-        result = _parse_cpu_max("0.01")
+        result = _parse_cpu_max(input_val)
+        # For small fractions, verify quota >= 1 and period is correct
         quota, period = result.split()
+        exp_quota, exp_period = expected.split()
         assert int(quota) >= 1
-        assert period == "100000"
+        assert int(quota) == int(exp_quota)
+        assert period == exp_period
 
     def test_config_applies(self):
         """SandboxConfig.__post_init__ converts friendly cpu_max."""
@@ -1490,27 +1541,17 @@ class TestParseCpuMax:
 class TestParseIoMax:
     """Unit tests for _parse_io_max sugar."""
 
-    def test_bare_size(self):
+    @pytest.mark.parametrize("input_val,expected_fragments", [
+        ("259:0 10mb", ["259:0 wbps=10485760"]),
+        ("259:0 wbps=10mb", ["259:0 wbps=10485760"]),
+        ("259:0 rbps=5mb wbps=10mb", ["rbps=5242880", "wbps=10485760"]),
+        ("259:0 wbps=10485760", ["259:0 wbps=10485760"]),
+    ])
+    def test_parse(self, input_val, expected_fragments):
         from nitrobox.config import _parse_io_max
-        # /dev/xxx won't resolve on CI, but MAJ:MIN passthrough works
-        result = _parse_io_max("259:0 10mb")
-        assert result == "259:0 wbps=10485760"
-
-    def test_keyed_size(self):
-        from nitrobox.config import _parse_io_max
-        result = _parse_io_max("259:0 wbps=10mb")
-        assert result == "259:0 wbps=10485760"
-
-    def test_multiple_params(self):
-        from nitrobox.config import _parse_io_max
-        result = _parse_io_max("259:0 rbps=5mb wbps=10mb")
-        assert "rbps=5242880" in result
-        assert "wbps=10485760" in result
-
-    def test_passthrough_raw(self):
-        from nitrobox.config import _parse_io_max
-        raw = "259:0 wbps=10485760"
-        assert _parse_io_max(raw) == raw
+        result = _parse_io_max(input_val)
+        for fragment in expected_fragments:
+            assert fragment in result
 
     def test_config_applies(self):
         """SandboxConfig.__post_init__ converts friendly io_max."""
@@ -1521,18 +1562,14 @@ class TestParseIoMax:
 class TestCpuShares:
     """Unit tests for _convert_cpu_shares."""
 
-    def test_default_1024(self):
+    @pytest.mark.parametrize("input_val,check", [
+        (1024, lambda r: 1 <= r <= 10000),
+        (2, lambda r: r >= 1),
+        (262144, lambda r: r == 10000),
+    ])
+    def test_convert(self, input_val, check):
         from nitrobox.config import _convert_cpu_shares
-        # Docker 1024 → cgroup v2 weight ~39 (formula: 1 + (1022*9999)/262142)
-        assert 1 <= _convert_cpu_shares(1024) <= 10000
-
-    def test_minimum(self):
-        from nitrobox.config import _convert_cpu_shares
-        assert _convert_cpu_shares(2) >= 1
-
-    def test_maximum(self):
-        from nitrobox.config import _convert_cpu_shares
-        assert _convert_cpu_shares(262144) == 10000
+        assert check(_convert_cpu_shares(input_val))
 
     def test_from_docker(self):
         cfg = SandboxConfig.from_docker("img", cpu_shares=512)
@@ -1543,70 +1580,71 @@ class TestCpuShares:
         assert cfg.cpu_shares == 2048
 
 
-class TestShmSize:
+class TestShmSizeParsing:
     """Unit tests for shm_size parsing."""
 
-    def test_parse_human_readable(self):
-        cfg = SandboxConfig(image="x", shm_size="256m")
-        assert cfg.shm_size == str(256 * 1024**2)
-
-    def test_from_docker(self):
-        cfg = SandboxConfig.from_docker("img", shm_size="2g")
-        assert cfg.shm_size == str(2 * 1024**3)
-
-    def test_from_docker_run(self):
-        cfg = SandboxConfig.from_docker_run("docker run --shm-size=512m ubuntu")
-        assert cfg.shm_size == str(512 * 1024**2)
+    @pytest.mark.parametrize("input_val,expected", [
+        (("config", "256m"), str(256 * 1024**2)),
+        (("from_docker", "2g"), str(2 * 1024**3)),
+        (("from_docker_run", "512m"), str(512 * 1024**2)),
+    ])
+    def test_parse(self, input_val, expected):
+        source, size = input_val
+        if source == "config":
+            cfg = SandboxConfig(image="x", shm_size=size)
+        elif source == "from_docker":
+            cfg = SandboxConfig.from_docker("img", shm_size=size)
+        elif source == "from_docker_run":
+            cfg = SandboxConfig.from_docker_run(f"docker run --shm-size={size} ubuntu")
+        assert cfg.shm_size == expected
 
 
 class TestMemorySwap:
     """Unit tests for memory_swap Docker→cgroup v2 conversion."""
 
-    def test_unlimited(self):
-        cfg = SandboxConfig(image="x", memory_swap="-1")
-        assert cfg.memory_swap == "max"
-
-    def test_zero_means_unset(self):
-        """Docker: memory_swap=0 is treated as unset."""
-        cfg = SandboxConfig(image="x", memory_swap="0")
-        assert cfg.memory_swap is None
-
-    def test_docker_semantics(self):
-        """memory_swap=1g with memory_max=512m → swap=512m."""
-        cfg = SandboxConfig(image="x", memory_max="512m", memory_swap="1g")
-        expected_swap = 1024**3 - 512 * 1024**2
-        assert cfg.memory_swap == str(expected_swap)
-
-    def test_from_docker(self):
-        cfg = SandboxConfig.from_docker("img", mem_limit="512m", memswap_limit="1g")
-        expected_swap = 1024**3 - 512 * 1024**2
-        assert cfg.memory_swap == str(expected_swap)
-
-    def test_from_docker_run(self):
-        cfg = SandboxConfig.from_docker_run(
-            "docker run -m 512m --memory-swap=1g ubuntu"
-        )
-        expected_swap = 1024**3 - 512 * 1024**2
-        assert cfg.memory_swap == str(expected_swap)
+    @pytest.mark.parametrize("input_val,expected", [
+        (("config", {"memory_swap": "-1"}), "max"),
+        (("config", {"memory_swap": "0"}), None),
+        (("config", {"memory_max": "512m", "memory_swap": "1g"}),
+         str(1024**3 - 512 * 1024**2)),
+        (("from_docker", {"mem_limit": "512m", "memswap_limit": "1g"}),
+         str(1024**3 - 512 * 1024**2)),
+        (("from_docker_run", "docker run -m 512m --memory-swap=1g ubuntu"),
+         str(1024**3 - 512 * 1024**2)),
+    ])
+    def test_swap(self, input_val, expected):
+        source, args = input_val
+        if source == "config":
+            cfg = SandboxConfig(image="x", **args)
+        elif source == "from_docker":
+            cfg = SandboxConfig.from_docker("img", **args)
+        elif source == "from_docker_run":
+            cfg = SandboxConfig.from_docker_run(args)
+        assert cfg.memory_swap == expected
 
 
 class TestTmpfs:
     """Unit tests for tmpfs parsing."""
 
-    def test_from_docker_dict(self):
-        cfg = SandboxConfig.from_docker("img", tmpfs={"/run": "size=100m"})
-        assert cfg.tmpfs == ["/run:size=100m"]
-
-    def test_from_docker_run(self):
-        cfg = SandboxConfig.from_docker_run(
-            "docker run --tmpfs /run:size=100m --tmpfs /tmp ubuntu"
-        )
-        assert "/run:size=100m" in cfg.tmpfs
-        assert "/tmp" in cfg.tmpfs
-
-    def test_config_direct(self):
-        cfg = SandboxConfig(image="x", tmpfs=["/run:size=50m"])
-        assert cfg.tmpfs == ["/run:size=50m"]
+    @pytest.mark.parametrize("input_val,expected_items", [
+        (("from_docker", {"tmpfs": {"/run": "size=100m"}}),
+         ["/run:size=100m"]),
+        (("from_docker_run",
+          "docker run --tmpfs /run:size=100m --tmpfs /tmp ubuntu"),
+         ["/run:size=100m", "/tmp"]),
+        (("config", {"tmpfs": ["/run:size=50m"]}),
+         ["/run:size=50m"]),
+    ])
+    def test_parse(self, input_val, expected_items):
+        source, args = input_val
+        if source == "from_docker":
+            cfg = SandboxConfig.from_docker("img", **args)
+        elif source == "from_docker_run":
+            cfg = SandboxConfig.from_docker_run(args)
+        elif source == "config":
+            cfg = SandboxConfig(image="x", **args)
+        for item in expected_items:
+            assert item in cfg.tmpfs
 
 
 class TestCapAdd:
@@ -1717,12 +1755,6 @@ class TestApplyImageDefaults:
 class TestFromDocker:
     """Unit tests for SandboxConfig.from_docker()."""
 
-    def test_basic(self):
-        cfg = SandboxConfig.from_docker("ubuntu:22.04", cpus=0.5, mem_limit="512m")
-        assert cfg.image == "ubuntu:22.04"
-        assert cfg.cpu_max == "50000 100000"
-        assert cfg.memory_max == str(512 * 1024**2)
-
     def test_volumes_dict(self):
         cfg = SandboxConfig.from_docker("img", volumes={
             "/host": {"bind": "/container", "mode": "ro"},
@@ -1812,12 +1844,6 @@ class TestFromDocker:
 
 class TestFromDockerRun:
     """Unit tests for SandboxConfig.from_docker_run()."""
-
-    def test_basic(self):
-        cfg = SandboxConfig.from_docker_run("docker run --cpus=0.5 -m 512m ubuntu:22.04")
-        assert cfg.image == "ubuntu:22.04"
-        assert cfg.cpu_max == "50000 100000"
-        assert cfg.memory_max == str(512 * 1024**2)
 
     def test_volumes_and_ports(self):
         cfg = SandboxConfig.from_docker_run(

@@ -1,6 +1,7 @@
 # nitrobox
 
 [![Tests](https://github.com/opensage-agent/nitrobox/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/nitrobox/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/opensage-agent/nitrobox/graph/badge.svg)](https://codecov.io/gh/opensage-agent/nitrobox)
 [![PyPI](https://img.shields.io/pypi/v/nitrobox)](https://pypi.org/project/nitrobox/)
 [![Python](https://img.shields.io/pypi/pyversions/nitrobox)](https://pypi.org/project/nitrobox/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)

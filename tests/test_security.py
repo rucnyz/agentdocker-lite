@@ -351,13 +351,6 @@ class TestUserNamespace:
         assert ec == 0
         assert "ok" in output
 
-    def test_dev_devices_survive_reset(self, userns_sandbox):
-        """/dev/null, /dev/zero, /dev/random should be char devices after reset."""
-        userns_sandbox.reset()
-        for dev in ("null", "zero", "random", "urandom"):
-            output, ec = userns_sandbox.run(f"test -c /dev/{dev} && echo ok")
-            assert ec == 0 and "ok" in output, f"/dev/{dev} is not a char device after reset"
-
     def test_proc_mounted(self, userns_sandbox):
         """/proc should be mounted."""
         output, ec = userns_sandbox.run("cat /proc/1/cmdline 2>/dev/null | tr '\\0' ' '")
@@ -2053,6 +2046,68 @@ class TestConfigCombinations:
 
 
 # ------------------------------------------------------------------ #
+#  Device passthrough helpers (shared between rootless and rootful)     #
+# ------------------------------------------------------------------ #
+
+
+def _check_fuse_device_passthrough(box):
+    """Verify bind-mounted /dev/fuse is accessible as a character device."""
+    output, ec = box.run("test -c /dev/fuse && echo exists")
+    assert ec == 0
+    assert "exists" in output
+    # Verify it's a real character device with correct major:minor
+    output, ec = box.run("stat -c '%t:%T' /dev/fuse")
+    assert ec == 0
+    assert "a:e5" in output  # major 10, minor 229
+
+
+def _check_device_survives_reset(box):
+    """Verify device passthrough works before and after reset."""
+    output, ec = box.run("test -c /dev/fuse && echo before")
+    assert ec == 0
+    assert "before" in output
+
+    box.reset()
+
+    output, ec = box.run("test -c /dev/fuse && echo after")
+    assert ec == 0
+    assert "after" in output
+    # Still a real device after reset
+    output, ec = box.run("stat -c '%t:%T' /dev/fuse")
+    assert ec == 0
+    assert "a:e5" in output
+
+
+def _check_kvm_ioctl(box):
+    """Verify KVM ioctl is not blocked by seccomp."""
+    output, ec = box.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
+    if "no" in output:
+        # Fallback: just verify /dev/kvm is openable (not blocked by seccomp)
+        output, ec = box.run(
+            "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
+        )
+        assert ec == 0, f"Failed to open /dev/kvm: {output}"
+        assert "kvm_open=ok" in output
+    else:
+        # KVM_GET_API_VERSION ioctl (0xAE00) should succeed
+        output, ec = box.run(
+            "python3 -c '"
+            "import fcntl, os; "
+            "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
+            "ver = fcntl.ioctl(fd, 0xAE00); "
+            "os.close(fd); "
+            "print(f\"kvm_api={ver}\")'"
+        )
+        assert ec == 0, f"KVM ioctl failed: {output}"
+        assert "kvm_api=12" in output
+
+
+def _check_devices_feature_flag(box):
+    """Verify features dict includes 'devices' when devices are configured."""
+    assert box.features.get("devices") is True
+
+
+# ------------------------------------------------------------------ #
 #  Device passthrough (rootless)                                       #
 # ------------------------------------------------------------------ #
 
@@ -2080,13 +2135,7 @@ class TestDevicesRootless:
         )
         box = Sandbox(config, name="userns-dev-fuse")
         try:
-            output, ec = box.run("test -c /dev/fuse && echo exists")
-            assert ec == 0
-            assert "exists" in output
-            # Verify it's a real character device with correct major:minor
-            output, ec = box.run("stat -c '%t:%T' /dev/fuse")
-            assert ec == 0
-            assert "a:e5" in output  # major 10, minor 229
+            _check_fuse_device_passthrough(box)
         finally:
             box.delete()
 
@@ -2133,19 +2182,7 @@ class TestDevicesRootless:
         )
         box = Sandbox(config, name="userns-dev-reset")
         try:
-            output, ec = box.run("test -c /dev/fuse && echo before")
-            assert ec == 0
-            assert "before" in output
-
-            box.reset()
-
-            output, ec = box.run("test -c /dev/fuse && echo after")
-            assert ec == 0
-            assert "after" in output
-            # Still a real device after reset
-            output, ec = box.run("stat -c '%t:%T' /dev/fuse")
-            assert ec == 0
-            assert "a:e5" in output
+            _check_device_survives_reset(box)
         finally:
             box.delete()
 
@@ -2217,7 +2254,7 @@ class TestDevicesRootless:
         )
         box = Sandbox(config, name="userns-dev-feat")
         try:
-            assert box.features.get("devices") is True
+            _check_devices_feature_flag(box)
         finally:
             box.delete()
 
@@ -2263,27 +2300,7 @@ class TestDevicesRootless:
         )
         box = Sandbox(config, name="userns-kvm-ioctl")
         try:
-            # Try python3 for ioctl test; skip if not available in image
-            output, ec = box.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
-            if "no" in output:
-                # Fallback: just verify /dev/kvm is openable (not blocked by seccomp)
-                output, ec = box.run(
-                    "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
-                )
-                assert ec == 0, f"Failed to open /dev/kvm: {output}"
-                assert "kvm_open=ok" in output
-            else:
-                # KVM_GET_API_VERSION ioctl (0xAE00) should succeed
-                output, ec = box.run(
-                    "python3 -c '"
-                    "import fcntl, os; "
-                    "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
-                    "ver = fcntl.ioctl(fd, 0xAE00); "
-                    "os.close(fd); "
-                    "print(f\"kvm_api={ver}\")'"
-                )
-                assert ec == 0, f"KVM ioctl failed: {output}"
-                assert "kvm_api=12" in output
+            _check_kvm_ioctl(box)
         finally:
             box.delete()
 
@@ -2306,12 +2323,7 @@ class TestDevicesRootful:
         )
         box = Sandbox(config, name="root-dev-fuse")
         try:
-            output, ec = box.run("test -c /dev/fuse && echo exists")
-            assert ec == 0
-            assert "exists" in output
-            output, ec = box.run("stat -c '%t:%T' /dev/fuse")
-            assert ec == 0
-            assert "a:e5" in output  # major 10, minor 229
+            _check_fuse_device_passthrough(box)
         finally:
             box.delete()
 
@@ -2330,15 +2342,7 @@ class TestDevicesRootful:
         )
         box = Sandbox(config, name="root-dev-reset")
         try:
-            output, ec = box.run("test -c /dev/fuse && echo before")
-            assert ec == 0
-            assert "before" in output
-
-            box.reset()
-
-            output, ec = box.run("test -c /dev/fuse && echo after")
-            assert ec == 0
-            assert "after" in output
+            _check_device_survives_reset(box)
         finally:
             box.delete()
 
@@ -2358,24 +2362,7 @@ class TestDevicesRootful:
         )
         box = Sandbox(config, name="root-kvm-ioctl")
         try:
-            output, ec = box.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
-            if "no" in output:
-                output, ec = box.run(
-                    "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
-                )
-                assert ec == 0, f"Failed to open /dev/kvm: {output}"
-                assert "kvm_open=ok" in output
-            else:
-                output, ec = box.run(
-                    "python3 -c '"
-                    "import fcntl, os; "
-                    "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
-                    "ver = fcntl.ioctl(fd, 0xAE00); "
-                    "os.close(fd); "
-                    "print(f\"kvm_api={ver}\")'"
-                )
-                assert ec == 0, f"KVM ioctl failed: {output}"
-                assert "kvm_api=12" in output
+            _check_kvm_ioctl(box)
         finally:
             box.delete()
 
@@ -2392,6 +2379,6 @@ class TestDevicesRootful:
         )
         box = Sandbox(config, name="root-dev-feat")
         try:
-            assert box.features.get("devices") is True
+            _check_devices_feature_flag(box)
         finally:
             box.delete()

@@ -9,19 +9,40 @@ import subprocess
 import pytest
 
 
+def _umount_stale_overlays(root: str) -> None:
+    """Umount any overlay mounts under *root* via the setuid helper."""
+    result = subprocess.run(["mount"], capture_output=True, text=True)
+    mounts = [
+        line.split(" on ")[1].split(" type ")[0]
+        for line in result.stdout.splitlines()
+        if root in line and " on " in line
+    ]
+    if not mounts:
+        return
+    try:
+        from nitrobox.checkpoint import _find_helper
+        helper = _find_helper()
+    except (FileNotFoundError, ImportError):
+        return
+    for mnt in mounts:
+        subprocess.run([helper, "umount", mnt], capture_output=True, timeout=5)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _cleanup_previous_garbage():
     """Clean up garbage dirs from previous pytest runs.
 
     Pytest moves old tmp dirs to ``garbage-*`` on startup, but can't
-    delete files with mapped UIDs (from userns layer extraction).
-    Clean them up here with ``rmtree_mapped`` which enters a userns.
+    delete files with mapped UIDs (from userns layer extraction) or
+    stale overlay mounts (from checkpoint tests).  Umount first, then
+    rmtree_mapped.
     """
     import glob
     from pathlib import Path
 
     garbage_root = Path(f"/tmp/pytest-of-{os.environ.get('USER', 'root')}")
     for garbage in glob.glob(str(garbage_root / "garbage-*")):
+        _umount_stale_overlays(garbage)
         try:
             from nitrobox.image.layers import rmtree_mapped
             rmtree_mapped(garbage)
@@ -89,8 +110,12 @@ def _assert_clean_after_test(request, tmp_path):
     # 1. Check for stale bind mounts
     stale_mounts = _find_stale_mounts(str(tmp_path))
     if stale_mounts:
-        # Try to clean up, then report
-        for mount_line in stale_mounts:
+        # Try to clean up via setuid helper (non-root can't umount
+        # root-created mounts from checkpoint restore).
+        _umount_stale_overlays(str(tmp_path))
+        # Fallback: plain umount -l for non-overlay mounts
+        remaining = _find_stale_mounts(str(tmp_path))
+        for mount_line in remaining:
             mount_point = mount_line.split(" on ")[1].split(" type ")[0] if " on " in mount_line else ""
             if mount_point:
                 subprocess.run(["umount", "-l", mount_point], capture_output=True)

@@ -43,7 +43,7 @@ nitrobox = "nitrobox.cli:main"
 nbx = "nitrobox.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=9.0"]
+dev = ["pytest>=9.0", "pytest-cov>=6.0"]
 
 [tool.maturin]
 python-source = "src"

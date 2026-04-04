@@ -590,15 +590,26 @@ class Sandbox:
         self._fixup_userns_ownership()
         self._persistent_shell.kill()
 
+        self._unmount_all()
+        # If overlay is still mounted (e.g. after checkpoint restore which
+        # mounts via the setuid helper), force a lazy umount as fallback.
+        if self._overlay_mounted and self._rootfs.is_mount():
+            try:
+                subprocess.run(
+                    ["umount", "-l", str(self._rootfs)],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+            self._overlay_mounted = False
         if not self._userns:
-            self._unmount_all()
             if self._fs_backend == "btrfs" and self._btrfs_active:
                 subprocess.run(
                     ["btrfs", "subvolume", "delete", str(self._rootfs)],
                     capture_output=True,
                 )
                 self._btrfs_active = False
-            self._cleanup_cgroup()
+        self._cleanup_cgroup()
 
         # Clean up Rust-side pasta netns bind mount (userns mode).
         netns_file = self._env_dir / ".netns"
@@ -1117,42 +1128,8 @@ class Sandbox:
         for d in (self._upper_dir, self._work_dir, self._rootfs):
             d.mkdir(parents=True, exist_ok=True)
 
-        # --- cgroup via systemd delegation --------------------------------
-        self._systemd_scope_properties: list[str] = []
-        if any(self._cgroup_limits.values()):
-            if shutil.which("systemd-run"):
-                prop_map = {
-                    "cpu_max": "CPUQuota",
-                    "memory_max": "MemoryMax",
-                    "pids_max": "TasksMax",
-                    "io_max": "IOWriteBandwidthMax",
-                    "cpu_shares": "CPUWeight",
-                    "memory_swap": "MemorySwapMax",
-                }
-                for key, sd_prop in prop_map.items():
-                    value = self._cgroup_limits.get(key)
-                    if value:
-                        if key == "cpu_max":
-                            parts = str(value).split()
-                            if len(parts) == 2:
-                                pct = int(int(parts[0]) / int(parts[1]) * 100)
-                                self._systemd_scope_properties.append(f"{sd_prop}={pct}%")
-                        elif key == "io_max":
-                            self._systemd_scope_properties.append(f"{sd_prop}={value}")
-                        elif key == "cpu_shares":
-                            from nitrobox.config import _convert_cpu_shares
-                            weight = _convert_cpu_shares(int(value))
-                            self._systemd_scope_properties.append(f"{sd_prop}={weight}")
-                        else:
-                            self._systemd_scope_properties.append(f"{sd_prop}={value}")
-                logger.debug(
-                    "cgroup via systemd delegation: %s",
-                    self._systemd_scope_properties,
-                )
-            else:
-                logger.warning(
-                    "cgroup resource limits requested but systemd-run not found."
-                )
+        # --- cgroup via delegation ----------------------------------------
+        self._setup_cgroup_rootless()
 
         # --- DNS + working dir --------------------------------------------
         if config.dns:
@@ -1186,6 +1163,7 @@ class Sandbox:
             "userns": True,
             "layer_cache": self._layer_dirs is not None,
             "whiteout": whiteout_strategy,
+            "cgroup_v2": self._cgroup_path is not None,
         })
 
     # ================================================================== #
@@ -1463,6 +1441,111 @@ class Sandbox:
             py_cleanup_cgroup(str(self._cgroup_path))
         except OSError as e:
             logger.debug("cgroup cleanup (non-fatal): %s", e)
+
+    # -- rootless cgroup via delegation -------------------------------- #
+
+    def _setup_cgroup_rootless(self) -> None:
+        """Set up cgroup for rootless mode using delegated cgroup hierarchy."""
+        if not any(self._cgroup_limits.values()):
+            return
+
+        from nitrobox._core import py_cgroup_v2_available
+
+        if not py_cgroup_v2_available():
+            logger.warning("cgroup v2 not available -- resource limits not enforced.")
+            return
+
+        cg_path = self._try_own_cgroup()
+        if cg_path is None:
+            cg_path = self._try_preallocated_cgroup()
+        if cg_path is None:
+            logger.warning(
+                "Rootless cgroup: no delegated cgroup available. "
+                "Resource limits will not be enforced. "
+                "Run 'nitrobox setup' to configure cgroup delegation."
+            )
+            return
+
+        self._cgroup_path = cg_path
+
+        limits: dict[str, str] = {}
+        for key, value in self._cgroup_limits.items():
+            if value:
+                limits[key] = str(value)
+        if limits:
+            from nitrobox._core import py_apply_cgroup_limits
+            try:
+                py_apply_cgroup_limits(str(cg_path), limits)
+            except OSError as e:
+                logger.warning("Failed to apply rootless cgroup limits: %s", e)
+
+        logger.debug("Rootless cgroup ready: %s", cg_path)
+
+    def _try_own_cgroup(self) -> Path | None:
+        """Try to create a child cgroup under our own delegated cgroup.
+
+        On systems with systemd user sessions, the user's cgroup is
+        delegated and we can create sub-cgroups without root.
+        """
+        try:
+            cg_content = Path("/proc/self/cgroup").read_text().strip()
+            # cgroup v2 format: "0::/user.slice/user-1000.slice/..."
+            for line in cg_content.splitlines():
+                if line.startswith("0::"):
+                    own_cg = line[3:]
+                    break
+            else:
+                return None
+
+            if not own_cg:
+                return None
+
+            base = Path(f"/sys/fs/cgroup{own_cg}")
+            if not base.exists():
+                return None
+
+            cg_dir = base / f"nitrobox-{self._env_dir.name}"
+            cg_dir.mkdir(exist_ok=True)
+
+            # Verify we can actually write to it
+            test_file = cg_dir / "cgroup.procs"
+            if not test_file.exists():
+                cg_dir.rmdir()
+                return None
+
+            logger.debug("Using delegated cgroup: %s", cg_dir)
+            return cg_dir
+        except OSError as e:
+            logger.debug("Delegated cgroup not available: %s", e)
+            return None
+
+    # Pre-allocated cgroup path created by ``nitrobox setup``.
+    CGROUP_PREALLOCATED = Path("/sys/fs/cgroup/nitrobox")
+
+    def _try_preallocated_cgroup(self) -> Path | None:
+        """Try the pre-allocated cgroup created by ``nitrobox setup``.
+
+        ``nitrobox setup`` uses Docker to create ``/sys/fs/cgroup/nitrobox``
+        owned by the current user, so no sudo is needed.
+        """
+        base = self.CGROUP_PREALLOCATED
+        if not base.exists():
+            return None
+        try:
+            cg_dir = base / self._env_dir.name
+            cg_dir.mkdir(exist_ok=True)
+
+            # Verify we can write
+            test_file = cg_dir / "cgroup.procs"
+            if not test_file.exists():
+                cg_dir.rmdir()
+                return None
+
+            logger.debug("Using pre-allocated cgroup: %s", cg_dir)
+            return cg_dir
+        except OSError as e:
+            logger.debug("Pre-allocated cgroup not available: %s", e)
+            return None
 
     # ================================================================== #
     #  Network: pasta / DNS                                                #

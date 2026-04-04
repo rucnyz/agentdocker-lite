@@ -470,6 +470,7 @@ class ComposeProject:
             seccomp = False
 
         # Network namespace strategy:
+        # - network_mode: none → isolated loopback-only network (no internet)
         # - network_mode: host → share host network directly
         # - Otherwise → shared userns+netns per compose network (Podman
         #   pod model).  Services on the same network share a netns and
@@ -479,7 +480,10 @@ class ComposeProject:
         net_ns = None
         net_isolate = False
 
-        if svc.network_mode != "host":
+        if svc.network_mode == "none":
+            # Docker "none" = loopback only, no external connectivity.
+            net_isolate = True
+        elif svc.network_mode != "host":
             net_names = svc.networks or ["default"]
             primary_net = net_names[0]
             if primary_net not in self._shared_nets:

@@ -243,17 +243,24 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "mem_limit", "memswap_limit", "env_file",
     # Functional support
     "extra_hosts", "sysctls",
-    # Parsed but not mapped (informational / ignored safely)
+    # Cosmetic / informational — safe to ignore silently
     "container_name", "profiles", "stdin_open", "tty",
     "labels", "logging",
-    # Parsed, ignored with log (rootless makes these less meaningful,
-    # or they need Rust core changes for real support)
-    "init", "user", "pid", "ipc",
     # Not needed: host networking replaces custom networks
     "networks",
     # Docker Compose fields parsed for compatibility but mapped to
     # nitrobox equivalents where possible (deploy → cpu/memory limits)
     "deploy", "pull_policy",
+})
+
+# Fields that affect container semantics but are not (yet) supported.
+# Accepted to avoid hard errors on common compose files, but a warning
+# is emitted so users know the field has no effect.
+_WARN_IGNORED_KEYS = frozenset({
+    "init",   # PID 1 init process — rootless sandboxes always use bash
+    "user",   # container user — sandbox runs as root in user namespace
+    "pid",    # PID namespace sharing — not supported
+    "ipc",    # IPC namespace sharing — not supported
 })
 
 
@@ -335,8 +342,18 @@ def _parse_compose(
         if not isinstance(svc, dict):
             continue
 
-        # Reject unsupported fields
-        unsupported = [k for k in svc if k not in _SUPPORTED_SERVICE_KEYS]
+        # Warn on fields that are accepted but have no effect.
+        ignored = [k for k in svc if k in _WARN_IGNORED_KEYS]
+        if ignored:
+            logger.warning(
+                "service %r: compose fields ignored (not supported in "
+                "nitrobox): %s",
+                name, ", ".join(sorted(ignored)),
+            )
+
+        # Reject truly unsupported fields
+        all_known = _SUPPORTED_SERVICE_KEYS | _WARN_IGNORED_KEYS
+        unsupported = [k for k in svc if k not in all_known]
         if unsupported:
             raise ValueError(
                 f"service {name!r}: unsupported compose fields: "
