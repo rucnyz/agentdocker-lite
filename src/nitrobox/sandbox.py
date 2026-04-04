@@ -365,20 +365,27 @@ class Sandbox:
     # -- file operations --------------------------------------------------- #
 
     def copy_to(self, local_path: str, container_path: str) -> None:
-        """Copy a file from host into the sandbox."""
+        """Copy a file or directory from host into the sandbox."""
         host_dst = self._host_path_write(container_path)
         host_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(local_path, str(host_dst))
+        src = Path(local_path)
+        if src.is_dir():
+            shutil.copytree(local_path, str(host_dst), dirs_exist_ok=True)
+        else:
+            shutil.copy2(local_path, str(host_dst))
 
     def copy_from(self, container_path: str, local_path: str) -> None:
-        """Copy a file from the sandbox to host."""
+        """Copy a file or directory from the sandbox to host."""
         host_src = self._host_path(container_path)
         if not host_src.exists():
             raise FileNotFoundError(
                 f"File {container_path} does not exist in the sandbox."
             )
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        shutil.copy2(str(host_src), local_path)
+        if host_src.is_dir():
+            shutil.copytree(str(host_src), local_path, dirs_exist_ok=True)
+        else:
+            shutil.copy2(str(host_src), local_path)
 
     def read_file(self, container_path: str) -> str:
         """Read file content from the sandbox."""

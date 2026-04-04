@@ -20,7 +20,8 @@ cd harbor && uv sync --all-extras --dev
 ## Harbor E2E (`bench_harbor_e2e.py`)
 
 Compares Docker vs nitrobox as harbor's execution environment.
-Pre-pulls all images before timing so both sides start from local cache.
+Pre-builds all images before timing (via `harbor run -a nop`) so both
+sides start from local cache.
 
 ```bash
 # Docker vs nitrobox (40 tasks, concurrency 4)
@@ -37,7 +38,7 @@ python examples/bench_harbor_e2e.py \
     --dataset terminal-bench@2.0 \
     --agent oracle \
     --n-tasks 40 --concurrency 4 \
-    --envs nitrobox --skip-pre-pull
+    --envs nitrobox --skip-pre-build
 
 # Full concurrency sweep with results saved
 python examples/bench_harbor_e2e.py \

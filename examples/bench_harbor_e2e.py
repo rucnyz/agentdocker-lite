@@ -31,13 +31,13 @@ Usage:
         --n-tasks 40 --concurrency 4 \\
         --envs docker,nitrobox
 
-    # Nitrobox only, skip pre-pull (caches already warm)
+    # Nitrobox only, skip pre-build (caches already warm)
     python examples/bench_harbor_e2e.py \\
         --harbor-dir /path/to/harbor \\
         --dataset terminal-bench@2.0 \\
         --agent oracle \\
         --n-tasks 40 --concurrency 4 \\
-        --envs nitrobox --skip-pre-pull
+        --envs nitrobox --skip-pre-build
 
     # Full concurrency sweep
     python examples/bench_harbor_e2e.py \\
@@ -215,54 +215,36 @@ def _format_results_table(
     return "\n".join(lines)
 
 
-def _pre_pull_images(harbor_dir: str, dataset: str) -> None:
-    """Pre-pull all Docker images used by the dataset's tasks.
+def _pre_build(harbor_dir: str, dataset: str, n_tasks: int) -> None:
+    """Ensure all images are built/pulled before the timed benchmark.
 
-    Scans task.toml files for ``docker_image`` fields and runs
-    ``docker pull`` for each unique image.  This ensures both Docker
-    and nitrobox start from the same baseline (images cached locally)
-    so the benchmark measures pure runtime overhead.
+    Runs ``harbor run -e docker -a nop -l <n_tasks>`` which triggers
+    harbor's own image resolution (Dockerfile build or registry pull)
+    for every task that will be benchmarked.  The ``nop`` agent does
+    nothing, so the only cost is environment setup.  The resulting
+    images land in Docker's local cache, which both Docker and nitrobox
+    environments can use.
     """
-    # Ensure dataset tasks are downloaded locally
-    subprocess.run(
-        ["uv", "run", "harbor", "datasets", "download", dataset],
-        cwd=harbor_dir, capture_output=True, text=True,
+    print(f"  Running: harbor run -e docker -a nop -l {n_tasks} ...")
+    result = subprocess.run(
+        [
+            "uv", "run", "harbor", "run",
+            "-d", dataset,
+            "-e", "docker",
+            "-a", "nop",
+            "-l", str(n_tasks),
+            "--n-concurrent", "4",
+            "--n-attempts", "1",
+            "--job-name", f"_prebuild_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        ],
+        cwd=harbor_dir, env={**os.environ},
+        capture_output=True, text=True,
     )
-
-    # Scan for task.toml files and extract docker_image values
-    import tomllib
-
-    images: set[str] = set()
-    datasets_dir = Path(harbor_dir) / "datasets"
-    tasks_dir = Path(harbor_dir) / "tasks"
-
-    for search_dir in [datasets_dir, tasks_dir]:
-        if not search_dir.exists():
-            continue
-        for toml_path in search_dir.rglob("task.toml"):
-            try:
-                with open(toml_path, "rb") as f:
-                    cfg = tomllib.load(f)
-                img = (cfg.get("environment") or {}).get("docker_image")
-                if img:
-                    images.add(img)
-            except Exception:
-                pass
-
-    if not images:
-        # Fallback: tasks use Dockerfile builds, need docker build (not pull).
-        # The first benchmark run will pay the build cost equally for both envs.
-        print("  No prebuilt images found (tasks use Dockerfile builds)")
-        return
-
-    print(f"  Found {len(images)} unique image(s): {', '.join(sorted(images))}")
-    for img in sorted(images):
-        print(f"  Pulling {img} ...")
-        subprocess.run(
-            ["docker", "pull", img],
-            capture_output=True, timeout=600,
-        )
-    print(f"  All images cached locally")
+    if result.returncode != 0:
+        print(f"  [WARN] pre-build exited with code {result.returncode}")
+        print(f"  stderr: {result.stderr[-300:]}")
+    else:
+        print("  Images ready in Docker local cache")
 
 
 def main():
@@ -278,8 +260,8 @@ def main():
     parser.add_argument("--concurrency", default="1,4")
     parser.add_argument("--envs", default="docker,nitrobox")
     parser.add_argument("--output", default=None)
-    parser.add_argument("--skip-pre-pull", action="store_true",
-                        help="Skip pre-pulling images (use if caches are already warm)")
+    parser.add_argument("--skip-pre-build", action="store_true",
+                        help="Skip pre-building images (use if caches are already warm)")
     args = parser.parse_args()
 
     concurrency_levels = [int(c) for c in args.concurrency.split(",")]
@@ -299,12 +281,12 @@ def main():
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # ── Pre-pull: ensure all images are in Docker local cache ────────
-    if not args.skip_pre_pull:
-        print(f"\nPre-pulling images (ensures fair comparison)...")
-        _pre_pull_images(args.harbor_dir, args.dataset)
+    # ── Pre-build: ensure all images are built before timing ────────
+    if not args.skip_pre_build:
+        print(f"\nPre-build (ensures fair comparison)...")
+        _pre_build(args.harbor_dir, args.dataset, args.n_tasks)
     else:
-        print(f"\nSkipping pre-pull (--skip-pre-pull)")
+        print(f"\nSkipping pre-build (--skip-pre-build)")
 
     # ── Benchmark runs ───────────────────────────────────────────────
     all_results = {}

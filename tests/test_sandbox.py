@@ -170,6 +170,22 @@ class TestFileOps:
         sandbox.copy_from("/workspace/copied.txt", str(dst))
         assert dst.read_text() == "copy test content"
 
+    def test_copy_to_directory(self, sandbox, tmp_path):
+        """copy_to handles directories with subdirectories."""
+        src_dir = tmp_path / "testdir"
+        src_dir.mkdir()
+        (src_dir / "file.txt").write_text("hello")
+        sub = src_dir / "subdir"
+        sub.mkdir()
+        (sub / "nested.txt").write_text("nested")
+
+        sandbox.copy_to(str(src_dir), "/workspace/testdir")
+
+        out, ec = sandbox.run("cat /workspace/testdir/file.txt")
+        assert out.strip() == "hello"
+        out, ec = sandbox.run("cat /workspace/testdir/subdir/nested.txt")
+        assert out.strip() == "nested"
+
     def test_read_nonexistent_raises(self, sandbox):
         with pytest.raises(FileNotFoundError):
             sandbox.read_file("/nonexistent/file.txt")
