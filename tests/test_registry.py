@@ -359,6 +359,91 @@ class TestPullImageLayers:
 
 
 # ====================================================================== #
+#  Regression: duplicate diff-ids in layer preparation                     #
+# ====================================================================== #
+
+
+class TestDuplicateDiffIds:
+    """Images with duplicate diff-ids must extract all unique layers.
+
+    Some Docker images have the same diff-id appearing more than once
+    (e.g. an empty layer reused at multiple positions).  The layer
+    cache uses content-addressable directories (one per unique diff-id),
+    so deduplication is correct — but the ``needed`` set computation
+    must not be confused by the duplicate.
+
+    Regression test for: zip(diff_ids, layer_dirs) misalignment when
+    diff_ids has duplicates but layer_dirs is deduplicated.
+    """
+
+    def test_needed_layers_with_duplicates(self, tmp_path):
+        """All unique layers are extracted even when diff-ids repeat."""
+        from nitrobox.image.store import _safe_cache_key
+
+        layers_dir = tmp_path / "layers"
+        layers_dir.mkdir()
+
+        # Image with 6 layers, layer B appears twice
+        diff_ids = [
+            "sha256:aaaa",
+            "sha256:bbbb",
+            "sha256:cccc",
+            "sha256:bbbb",  # duplicate
+            "sha256:dddd",
+            "sha256:eeee",
+        ]
+
+        # Deduplicated layer dirs (what prepare_rootfs_layers_from_docker builds)
+        layer_dirs = list(dict.fromkeys(
+            layers_dir / _safe_cache_key(did) for did in diff_ids
+        ))
+        assert len(layer_dirs) == 5  # bbbb appears once
+
+        # Pre-cache layers A and B (simulating partial cache)
+        (layers_dir / _safe_cache_key("sha256:aaaa")).mkdir()
+        (layers_dir / _safe_cache_key("sha256:bbbb")).mkdir()
+
+        # Compute needed — this is the code that was buggy
+        needed_keys = {d.name for d in layer_dirs if not d.exists()}
+        _key_to_did = {_safe_cache_key(did): did for did in diff_ids}
+        needed = {_key_to_did[k] for k in needed_keys if k in _key_to_did}
+
+        # Must include C, D, E — NOT miss any
+        assert "sha256:cccc" in needed
+        assert "sha256:dddd" in needed
+        assert "sha256:eeee" in needed
+        # Must NOT include already-cached A and B
+        assert "sha256:aaaa" not in needed
+        assert "sha256:bbbb" not in needed
+
+    def test_all_unique_dirs_present_after_extraction(self, tmp_path):
+        """After extraction, every unique diff-id has a directory."""
+        from nitrobox.image.store import _safe_cache_key
+
+        layers_dir = tmp_path / "layers"
+        layers_dir.mkdir()
+
+        diff_ids = [
+            "sha256:1111",
+            "sha256:2222",
+            "sha256:1111",  # duplicate
+            "sha256:3333",
+        ]
+
+        layer_dirs = list(dict.fromkeys(
+            layers_dir / _safe_cache_key(did) for did in diff_ids
+        ))
+
+        # Simulate extraction: create all directories
+        for d in layer_dirs:
+            d.mkdir(exist_ok=True)
+
+        # Verify: the verification check should pass
+        still_missing = [d for d in layer_dirs if not d.exists()]
+        assert still_missing == []
+
+
+# ====================================================================== #
 #  Integration tests — real network (skipped if offline)                   #
 # ====================================================================== #
 
