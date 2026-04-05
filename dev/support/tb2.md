@@ -104,39 +104,25 @@ Upstream PR open since 2026-02-25:
 
 ## Reproduce
 
-Use the `bench_harbor_e2e.py` script from `examples/`:
-
 ```bash
-# Full TB2 comparison (pre-build + timed run on both envs)
+# Prerequisites
+docker login   # required — 89 prebuilt images need Docker Hub access
+
+# Full TB2 comparison
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
     --agent oracle \
-    --n-tasks 999 --concurrency 4 \
-    --envs docker,nitrobox \
+    --concurrency 4 \
     --output tb2_results.json
 
-# Re-test a specific task on both envs
+# Re-test a specific task
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
     --agent oracle \
-    --n-tasks 1 --concurrency 1 \
-    --envs docker,nitrobox \
     -i <task-name>
-
-# Nitrobox only, skip pre-build (caches already warm)
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent oracle \
-    --n-tasks 999 --concurrency 4 \
-    --envs nitrobox \
-    --skip-pre-build
 ```
-
-The script handles cache warmup, timing, and prints a comparison table
-with wall-clock speedup, setup overhead, and correctness match.
 
 ## Notes
 

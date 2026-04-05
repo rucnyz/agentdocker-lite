@@ -8,7 +8,7 @@ environment as baseline.
 
 | Dataset | Version | Tasks | Status | Notes |
 |---------|---------|-------|--------|-------|
-| [terminal-bench](tb2.md) | 2.0 | 89 | **82/89 match** | 4 both-fail (task bugs), 3 differ (2 flaky, 1 fixed) |
+| [terminal-bench](tb2.md) | 2.0 | 89 | **86/89 match** | 4 both-fail (task bugs), 3 differ (2 flaky, 1 fixed) |
 | swebench | — | — | Not tested | |
 | swebenchpro | — | — | Not tested | |
 | swesmith | — | — | Not tested | |
@@ -31,31 +31,52 @@ environment as baseline.
 
 ## How to Run
 
-Use `examples/bench_harbor_e2e.py` which handles pre-build cache warmup,
-timed comparison, and per-task correctness checks:
+Use `examples/bench_harbor_e2e.py` — runs harbor with default settings
+for each environment and compares results:
 
 ```bash
-# Full comparison (all tasks, concurrency 4, pre-build + timed)
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset <dataset>@<version> \
-    --agent oracle \
-    --n-tasks 999 --concurrency 4 \
-    --envs docker,nitrobox \
-    --output results.json
+# Prerequisites
+cd harbor && uv sync --all-extras --dev
+pip install nitrobox
+docker login   # required to avoid Docker Hub rate limits
 
-# Single dataset, skip pre-build if caches warm
+# Full comparison (all tasks, concurrency 4)
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
     --agent oracle \
-    --n-tasks 999 --concurrency 4 \
-    --envs docker,nitrobox \
-    --skip-pre-build
+    --concurrency 4
+
+# Specific tasks only
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle \
+    -i vulnerable-secret -i portfolio-optimization
+
+# Concurrency sweep
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle \
+    --concurrency 1,4,8 \
+    --output results.json
 ```
 
-The script outputs wall-clock speedup, setup overhead breakdown,
-and per-task reward match/mismatch.
+## Clean State (for reproducible benchmarks)
+
+```bash
+# Nitrobox caches (may need docker for root-owned dirs)
+docker run --rm -v /tmp:/tmp alpine rm -rf /tmp/nitrobox_$(id -u)
+rm -rf ~/.cache/nitrobox/rootfs/
+
+# Harbor caches
+rm -rf ~/.cache/harbor/tasks/
+rm -rf /path/to/harbor/jobs/bench_*
+
+# Docker images (optional — forces re-pull)
+docker images --format "{{.Repository}}:{{.Tag}}" | grep alexgshaw | xargs -r docker rmi -f
+```
 
 ## Criteria
 
