@@ -30,35 +30,23 @@ Each dataset is tested against Docker as baseline.
 
 ## Test Plan
 
-For each dataset, run three benchmarks:
+For each dataset, run two benchmarks:
 
-### 1. Correctness (oracle, cold start)
+### 1. Correctness + performance (oracle, cold + warm)
 
-Verifies nitrobox produces the same results as Docker on all tasks.
-
-```bash
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset <dataset>@<version> \
-    --agent oracle --concurrency 4 \
-    --envs docker,nitrobox
-```
-
-### 2. Performance (oracle, cold + warm start)
-
-Measures per-phase timing breakdown: env_setup, agent_exec, verifier,
-teardown. Run twice — first with `--no-delete` (cold, keeps caches),
-second without (warm, cleans up).
+Run twice: first = cold start (verifies correctness + cold timing),
+second = warm start (measures cached performance). `--no-delete` on
+the first run preserves caches for the second run.
 
 ```bash
-# Cold start — caches empty, --no-delete preserves them
+# Cold start — correctness + cold timing, keeps caches
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset <dataset>@<version> \
     --agent oracle --concurrency 4 \
     --envs docker,nitrobox --no-delete
 
-# Warm start — both sides have cached images/layers, --delete cleans up
+# Warm start — cached performance, cleans up after
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset <dataset>@<version> \
@@ -66,12 +54,10 @@ python examples/bench_harbor_e2e.py \
     --envs docker,nitrobox
 ```
 
-### 3. Real agent (LLM overhead)
+### 2. Real agent (LLM overhead)
 
 Measures sandbox overhead vs LLM inference time. The `llm_inference`
-field in the output shows actual API call time; `overhead` is
-everything else (env_setup + agent_setup + verifier + teardown +
-sandbox command execution).
+field shows actual API call time; `overhead` is everything else.
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
