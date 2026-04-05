@@ -104,24 +104,39 @@ Upstream PR open since 2026-02-25:
 
 ## Reproduce
 
+Use the `bench_harbor_e2e.py` script from `examples/`:
+
 ```bash
-cd harbor
+# Full TB2 comparison (pre-build + timed run on both envs)
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle \
+    --n-tasks 999 --concurrency 4 \
+    --envs docker,nitrobox \
+    --output tb2_results.json
 
-# Full comparison
-uv run harbor run -d terminal-bench@2.0 -a oracle -e nitrobox -n 4 --job-name tb2_nitrobox -y
-uv run harbor run -d terminal-bench@2.0 -a oracle -e docker -n 4 --job-name tb2_docker -y
+# Re-test a specific task on both envs
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle \
+    --n-tasks 1 --concurrency 1 \
+    --envs docker,nitrobox \
+    -i <task-name>
 
-# Compare results
-for d in jobs/tb2_nitrobox/*/; do
-    task=$(basename "$d" | sed 's/__.*//g')
-    nr=$(cat "$d/verifier/reward.txt" 2>/dev/null || echo "ERR")
-    dr=$(find jobs/tb2_docker -path "*${task}__*" -name "reward.txt" -exec cat {} \; 2>/dev/null || echo "ERR")
-    [ "$nr" != "$dr" ] && echo "DIFF: $task nitrobox=$nr docker=$dr"
-done
-
-# Re-test a specific task
-uv run harbor run -d terminal-bench@2.0 -a oracle -e nitrobox -n 1 -i <task-name> --job-name test -y
+# Nitrobox only, skip pre-build (caches already warm)
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle \
+    --n-tasks 999 --concurrency 4 \
+    --envs nitrobox \
+    --skip-pre-build
 ```
+
+The script handles cache warmup, timing, and prints a comparison table
+with wall-clock speedup, setup overhead, and correctness match.
 
 ## Notes
 

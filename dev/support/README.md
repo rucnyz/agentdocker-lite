@@ -31,20 +31,31 @@ environment as baseline.
 
 ## How to Run
 
+Use `examples/bench_harbor_e2e.py` which handles pre-build cache warmup,
+timed comparison, and per-task correctness checks:
+
 ```bash
-# Full comparison (oracle agent, c4, all tasks)
+# Full comparison (all tasks, concurrency 4, pre-build + timed)
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset <dataset>@<version> \
+    --agent oracle \
+    --n-tasks 999 --concurrency 4 \
+    --envs docker,nitrobox \
+    --output results.json
+
+# Single dataset, skip pre-build if caches warm
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
     --agent oracle \
-    --concurrency 4 \
-    --envs docker,nitrobox
-
-# Or manually:
-cd harbor
-uv run harbor run -d <dataset>@<version> -a oracle -e nitrobox -n 4 --job-name <name> -y
-uv run harbor run -d <dataset>@<version> -a oracle -e docker -n 4 --job-name <name> -y
+    --n-tasks 999 --concurrency 4 \
+    --envs docker,nitrobox \
+    --skip-pre-build
 ```
+
+The script outputs wall-clock speedup, setup overhead breakdown,
+and per-task reward match/mismatch.
 
 ## Criteria
 
