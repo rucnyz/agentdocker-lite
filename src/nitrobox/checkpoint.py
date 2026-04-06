@@ -29,28 +29,36 @@ _CRIU_DIR = "criu"
 _META_FILE = "meta.json"
 
 
-def _core_bin() -> str:
-    """Find the nitrobox-core binary."""
-    p = os.environ.get("NITROBOX_CORE_BIN")
-    if p:
-        return p
-    candidate = Path(__file__).parent.parent.parent / "go" / "nitrobox-core"
-    if candidate.is_file():
-        return str(candidate)
-    return "nitrobox-core"
+def _find_helper() -> str:
+    """Find the setuid checkpoint helper binary."""
+    for p in ["/usr/local/bin/nitrobox-checkpoint-helper",
+              "/usr/bin/nitrobox-checkpoint-helper"]:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    vendored = Path(__file__).parent / "_vendor" / "nitrobox-checkpoint-helper"
+    if vendored.is_file():
+        return str(vendored)
+    system = shutil.which("nitrobox-checkpoint-helper")
+    if system:
+        return system
+    raise FileNotFoundError(
+        "nitrobox-checkpoint-helper not found. Run 'nitrobox setup'."
+    )
 
 
 def _find_criu() -> str:
-    """Find the CRIU binary."""
+    """Find the CRIU binary (prefer system-installed with file capabilities)."""
     p = os.environ.get("NITROBOX_CRIU_PATH")
     if p:
         return p
+    # System-installed CRIU has file capabilities from 'nitrobox setup'
+    for candidate in ["/usr/local/bin/criu", "/usr/bin/criu"]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # Vendored fallback (may lack capabilities)
     vendored = Path(__file__).parent / "_vendor" / "criu"
     if vendored.is_file():
         return str(vendored)
-    system = shutil.which("criu")
-    if system:
-        return system
     raise FileNotFoundError("criu not found")
 
 
@@ -103,6 +111,7 @@ class CheckpointManager:
 
     def __init__(self, sandbox: Sandbox, helper_binary: str | None = None):
         self._sandbox = sandbox
+        self._helper = helper_binary or _find_helper()
         # Become a subreaper so CRIU-restored processes get reparented to us
         import ctypes
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
@@ -144,32 +153,35 @@ class CheckpointManager:
         }
         (ckpt_dir / _META_FILE).write_text(json.dumps(meta, indent=2))
 
-        # 4. Build dump request.
-        rootfs = str(self._sandbox._rootfs)
+        # 4. Build dump command.
         ext_mounts = ["/proc", "/dev"]
         external_pipes = [f"pipe:[{inode}]" for _, inode in all_pipe_inodes.items()]
 
-        dump_opts = {
-            "pid": init_pid,
-            "images_dir": str(criu_dir),
-            "rootfs": rootfs,
-            "leave_running": leave_running,
-            "track_mem": track_mem,
-            "ext_mounts": ext_mounts,
-            "ext_pipes": external_pipes,
-            "criu_path": _find_criu(),
-            "ns_pid": init_pid,
-        }
+        cmd = [
+            self._helper, "dump",
+            "--ns-pid", str(init_pid),
+            "--tree", str(init_pid),
+            "--images-dir", str(criu_dir),
+            "--shell-job",
+        ]
+        if leave_running:
+            cmd.append("--leave-running")
+        if track_mem:
+            cmd.append("--track-mem")
+        for mnt in ext_mounts:
+            cmd.extend(["--ext-mount-map", f"{mnt}:{mnt}"])
+        for pipe in external_pipes:
+            cmd.extend(["--external", pipe])
 
-        # 5. Call Go checkpoint-dump.
-        result = subprocess.run(
-            [_core_bin(), "checkpoint-dump"],
-            input=json.dumps(dump_opts).encode(),
-            capture_output=True,
-        )
+        # 5. Run helper dump.
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
+            log_file = criu_dir / "dump.log"
+            criu_log = log_file.read_text()[-2000:] if log_file.exists() else ""
             raise RuntimeError(
-                f"CRIU dump failed:\n{result.stderr.decode().strip()}"
+                f"CRIU dump failed (exit={result.returncode}):\n"
+                f"stderr: {result.stderr.strip()}\n"
+                f"log (tail): {criu_log}"
             )
 
         logger.info("Checkpoint saved: %s", path)
@@ -275,25 +287,27 @@ class CheckpointManager:
                     inherit_fds.append({"key": desc, "fd": fd_map[i]})
 
         rootfs = str(self._sandbox._rootfs)
-        pidfile = str(criu_dir / "restore.pid")
+        pidfile = criu_dir / "restore.pid"
         all_pass_fds = tuple(fd for fd in new_fds if fd >= 0)
 
-        # 6. Call Go checkpoint-restore.
-        restore_opts = {
-            "images_dir": str(criu_dir),
-            "rootfs": rootfs,
-            "pid_file": pidfile,
-            "inherit_fds": inherit_fds,
-            "criu_path": _find_criu(),
-            "ns_pid": 0,
-        }
+        # 6. Run helper restore.
+        cmd = [
+            self._helper, "restore",
+            "--ns-pid", str(os.getpid()),
+            "--images-dir", str(criu_dir),
+            "--root", rootfs,
+            "--shell-job",
+            "--restore-sibling",
+            "--restore-detached",
+            "--mntns-compat-mode",
+            "--pidfile", str(pidfile),
+        ]
+        for ifd in inherit_fds:
+            cmd.extend(["--inherit-fd", f"fd[{ifd['fd']}]:{ifd['key']}"])
 
         result = subprocess.run(
-            [_core_bin(), "checkpoint-restore"],
-            input=json.dumps(restore_opts).encode(),
-            capture_output=True,
-            close_fds=False,
-            pass_fds=all_pass_fds,
+            cmd, capture_output=True, text=True,
+            close_fds=False, pass_fds=all_pass_fds,
         )
 
         # Close child-side fds.
@@ -312,12 +326,15 @@ class CheckpointManager:
                         os.close(fd)
                     except OSError:
                         pass
+            log_file = criu_dir / "restore.log"
+            criu_log = log_file.read_text()[-2000:] if log_file.exists() else ""
             raise RuntimeError(
-                f"CRIU restore failed:\n{result.stderr.decode().strip()}"
+                f"CRIU restore failed (exit={result.returncode}):\n"
+                f"stderr: {result.stderr.strip()}\n"
+                f"log (tail): {criu_log}"
             )
 
-        resp = json.loads(result.stdout.decode().strip())
-        restored_pid = resp.get("pid", 0)
+        restored_pid = int(pidfile.read_text().strip())
 
         # 7. Reconnect shell.
         shell.pid = restored_pid
