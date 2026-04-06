@@ -411,7 +411,7 @@ class TestUserNamespace:
 
     def test_whiteout_strategy(self, userns_sandbox):
         """Whiteout strategy should be detected based on kernel version."""
-        from nitrobox.rootfs import _detect_whiteout_strategy
+        from nitrobox.storage.whiteout import _detect_whiteout_strategy
         strategy = _detect_whiteout_strategy()
         assert strategy in ("xattr", "userns")
         assert userns_sandbox.features.get("whiteout") == strategy

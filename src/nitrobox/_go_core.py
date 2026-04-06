@@ -73,8 +73,6 @@ char* NbxApplyLandlock(char* readPathsJSON, char* writePathsJSON, char* portsJSO
 
 // Namespace
 char* NbxUsernFixupForDelete(int usernsPid, char* dirPath, unsigned int* outCount);
-char* NbxExtractTarInUserns(char* tarPath, char* dest, unsigned int outerUID, unsigned int outerGID, unsigned int subStart, unsigned int subCount);
-char* NbxRmtreeInUserns(char* path, unsigned int outerUID, unsigned int outerGID, unsigned int subStart, unsigned int subCount);
 """
 
 _ffi = cffi.FFI()
@@ -429,30 +427,6 @@ def py_userns_fixup_for_delete(userns_pid: int, dir_path: str) -> int:
     _check_err(_get_lib().NbxUsernFixupForDelete(userns_pid, _c(dir_path), out))
     return out[0]
 
-
-def py_extract_tar_in_userns(
-    tar_path: str,
-    dest: str,
-    outer_uid: int,
-    outer_gid: int,
-    sub_start: int,
-    sub_count: int,
-) -> None:
-    _check_err(_get_lib().NbxExtractTarInUserns(
-        _c(tar_path), _c(dest), outer_uid, outer_gid, sub_start, sub_count,
-    ))
-
-
-def py_rmtree_in_userns(
-    path: str,
-    outer_uid: int,
-    outer_gid: int,
-    sub_start: int,
-    sub_count: int,
-) -> None:
-    _check_err(_get_lib().NbxRmtreeInUserns(
-        _c(path), outer_uid, outer_gid, sub_start, sub_count,
-    ))
 
 
 # ======================================================================

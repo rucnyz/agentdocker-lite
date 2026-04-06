@@ -118,8 +118,6 @@ extern char* NbxApplySeccompFilter(void);
 extern char* NbxDropCapabilities(char* extraKeepJSON, char* extraDropJSON, unsigned int* outDropped);
 extern char* NbxApplyLandlock(char* readPathsJSON, char* writePathsJSON, char* portsJSON, int strict, int* outApplied);
 extern char* NbxUsernFixupForDelete(int usernsPid, char* dirPath, unsigned int* outCount);
-extern char* NbxExtractTarInUserns(char* tarPath, char* dest, unsigned int outerUID, unsigned int outerGID, unsigned int subStart, unsigned int subCount);
-extern char* NbxRmtreeInUserns(char* path, unsigned int outerUID, unsigned int outerGID, unsigned int subStart, unsigned int subCount);
 extern char* NbxSpawnSandbox(char* configJSON, char** outResultJSON);
 
 #ifdef __cplusplus

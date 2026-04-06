@@ -3,13 +3,11 @@ module github.com/opensage-agent/nitrobox/go
 go 1.25.0
 
 require (
-	github.com/checkpoint-restore/go-criu/v7 v7.2.0
 	github.com/containers/buildah v1.43.0
 	github.com/spf13/cobra v1.10.2
 	go.podman.io/image/v5 v5.39.2
 	go.podman.io/storage v1.62.0
 	golang.org/x/sys v0.42.0
-	google.golang.org/protobuf v1.36.9
 )
 
 require (
@@ -130,6 +128,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20250414145226-207652e42e2e // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250414145226-207652e42e2e // indirect
 	google.golang.org/grpc v1.72.2 // indirect
+	google.golang.org/protobuf v1.36.9 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 	tags.cncf.io/container-device-interface v1.0.1 // indirect
