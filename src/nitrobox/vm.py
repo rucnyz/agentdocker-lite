@@ -588,7 +588,7 @@ class QemuVM:
         # Try host-side Rust binding first.
         try:
             host_sock = self._resolve_host_socket(self._qmp_path)
-            from nitrobox._core import py_qmp_send
+            from nitrobox._backend import py_qmp_send
             output = py_qmp_send(host_sock, msg_json, timeout)
             return json.loads(output)
         except (OSError, ImportError, FileNotFoundError):

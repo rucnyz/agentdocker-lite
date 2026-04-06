@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from nitrobox._core import (
+from nitrobox._backend import (
     py_bind_mount,
     py_fuser_kill,
     py_make_private,

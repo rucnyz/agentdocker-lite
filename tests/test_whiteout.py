@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from nitrobox._core import py_convert_whiteouts
+from nitrobox._backend import py_convert_whiteouts
 
 
 def _can_set_user_xattr(tmp_path: Path) -> bool:

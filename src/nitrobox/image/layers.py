@@ -588,7 +588,7 @@ def _extract_tar_in_userns(raw: bytes, dest_dir: Path) -> None:
     tar_path.write_bytes(raw)
 
     try:
-        from nitrobox._core import py_extract_tar_in_userns
+        from nitrobox._backend import py_extract_tar_in_userns
 
         py_extract_tar_in_userns(
             str(tar_path), str(dest_dir),
@@ -866,7 +866,7 @@ def _extract_snapshot_layer(
         wt = threading.Thread(target=_writer, daemon=True)
         wt.start()
         try:
-            from nitrobox._core import py_extract_tar_in_userns
+            from nitrobox._backend import py_extract_tar_in_userns
             py_extract_tar_in_userns(
                 str(fifo_path), str(dest_dir),
                 outer_uid, outer_gid, sub_start, sub_count,

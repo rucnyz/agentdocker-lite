@@ -142,7 +142,7 @@ def _parse_io_max(value: str) -> str:
 
 def _convert_cpu_shares(shares: int) -> int:
     """Convert Docker ``--cpu-shares`` to cgroup v2 ``cpu.weight``."""
-    from nitrobox._core import py_convert_cpu_shares
+    from nitrobox._backend import py_convert_cpu_shares
     return int(py_convert_cpu_shares(shares))
 
 

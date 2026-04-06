@@ -60,7 +60,7 @@ def _convert_whiteouts_in_layer(layer_dir: Path, strategy: str = "") -> None:
 
     # Use Rust implementation: direct setxattr/mknod syscalls,
     # ~100x faster than spawning setfattr per file.
-    from nitrobox._core import py_convert_whiteouts
+    from nitrobox._backend import py_convert_whiteouts
     py_convert_whiteouts(str(layer_dir), strategy == "xattr")
 
 

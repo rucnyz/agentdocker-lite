@@ -86,7 +86,7 @@ def _make_tar(**entries) -> bytes:
 def _extract(tar_data: bytes, dest: Path) -> None:
     """Extract tar via Rust unpack in userns."""
     from nitrobox.config import detect_subuid_range
-    from nitrobox._core import py_extract_tar_in_userns
+    from nitrobox._backend import py_extract_tar_in_userns
 
     subuid = detect_subuid_range()
     assert subuid is not None

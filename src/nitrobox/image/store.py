@@ -225,7 +225,7 @@ def _default_rootfs_cache_dir() -> Path | None:
 def _image_store_get(image_name: str) -> ImageConfig | None:
     """Look up image config in Rust in-memory store."""
     try:
-        from nitrobox._core import py_image_store_get
+        from nitrobox._backend import py_image_store_get
         raw = py_image_store_get(image_name)
         if raw is None:
             return None
@@ -246,7 +246,7 @@ def _image_store_get(image_name: str) -> ImageConfig | None:
 def _image_store_populate(image_name: str, config: ImageConfig) -> None:
     """Populate Rust ImageStore from an :class:`ImageConfig`."""
     try:
-        from nitrobox._core import py_image_store_put
+        from nitrobox._backend import py_image_store_put
         payload = json.dumps({
             "image_id": "",
             "diff_ids": config.get("diff_ids", []),

@@ -120,7 +120,7 @@ def _resolve_registry_domain(image: str) -> str:
     ``distribution/reference``) for correct parsing.
     """
     try:
-        from nitrobox._core import py_parse_image_ref
+        from nitrobox._backend import py_parse_image_ref
         domain, _, _ = py_parse_image_ref(image)
         return domain
     except Exception:

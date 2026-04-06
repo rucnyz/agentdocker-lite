@@ -66,7 +66,7 @@ def _docker_socket_available() -> bool:
 def _has_rust_image_store() -> bool:
     """Return True if py_image_store_get/put/clear are available in _core."""
     try:
-        from nitrobox._core import py_image_store_clear  # noqa: F401
+        from nitrobox._backend import py_image_store_clear  # noqa: F401
         return True
     except ImportError:
         return False
@@ -75,7 +75,7 @@ def _has_rust_image_store() -> bool:
 def _has_rust_parse_image_ref() -> bool:
     """Return True if py_parse_image_ref is available in _core."""
     try:
-        from nitrobox._core import py_parse_image_ref  # noqa: F401
+        from nitrobox._backend import py_parse_image_ref  # noqa: F401
         return True
     except ImportError:
         return False
@@ -469,7 +469,7 @@ class TestRustParseImageRef:
     @staticmethod
     def _parse(image: str) -> tuple[str, str, str]:
         _requires_rust_parse_image_ref()
-        from nitrobox._core import py_parse_image_ref
+        from nitrobox._backend import py_parse_image_ref
         return py_parse_image_ref(image)
 
     @pytest.mark.parametrize(
@@ -521,26 +521,26 @@ class TestRustImageStore:
         """Clear the store before each test to avoid cross-contamination."""
         if not _has_rust_image_store():
             return
-        from nitrobox._core import py_image_store_clear
+        from nitrobox._backend import py_image_store_clear
         py_image_store_clear()
 
     def teardown_method(self):
         """Clear the store after each test."""
         if not _has_rust_image_store():
             return
-        from nitrobox._core import py_image_store_clear
+        from nitrobox._backend import py_image_store_clear
         py_image_store_clear()
 
     def test_get_returns_none_for_missing(self):
         """py_image_store_get returns None for an image not in the store."""
         _requires_rust_image_store()
-        from nitrobox._core import py_image_store_get
+        from nitrobox._backend import py_image_store_get
         assert py_image_store_get("nonexistent:latest") is None
 
     def test_put_and_get_roundtrip(self):
         """Store a config, retrieve it, and verify fields."""
         _requires_rust_image_store()
-        from nitrobox._core import py_image_store_get, py_image_store_put
+        from nitrobox._backend import py_image_store_get, py_image_store_put
 
         config = {
             "image_id": "sha256:abc123",
@@ -567,7 +567,7 @@ class TestRustImageStore:
     def test_put_indexes_by_image_id(self):
         """Config is also retrievable by image_id (digest)."""
         _requires_rust_image_store()
-        from nitrobox._core import py_image_store_get, py_image_store_put
+        from nitrobox._backend import py_image_store_get, py_image_store_put
 
         config = {
             "image_id": "sha256:deadbeef",
@@ -594,7 +594,7 @@ class TestRustImageStore:
     def test_clear_removes_all_entries(self):
         """py_image_store_clear empties the store."""
         _requires_rust_image_store()
-        from nitrobox._core import (
+        from nitrobox._backend import (
             py_image_store_clear,
             py_image_store_get,
             py_image_store_put,
@@ -623,7 +623,7 @@ class TestRustImageStore:
     def test_put_invalid_json_raises(self):
         """py_image_store_put raises ValueError on invalid JSON."""
         _requires_rust_image_store()
-        from nitrobox._core import py_image_store_put
+        from nitrobox._backend import py_image_store_put
 
         with pytest.raises(ValueError):
             py_image_store_put("bad:v1", "not valid json {{{")
@@ -631,7 +631,7 @@ class TestRustImageStore:
     def test_put_overwrites_existing(self):
         """Storing under the same name overwrites the previous entry."""
         _requires_rust_image_store()
-        from nitrobox._core import py_image_store_get, py_image_store_put
+        from nitrobox._backend import py_image_store_get, py_image_store_put
 
         config_v1 = json.dumps({
             "image_id": "sha256:v1",
@@ -677,13 +677,13 @@ class TestRegistryFirstIntegration:
         """Clear image store to ensure clean state."""
         if not _has_rust_image_store():
             return
-        from nitrobox._core import py_image_store_clear
+        from nitrobox._backend import py_image_store_clear
         py_image_store_clear()
 
     def teardown_method(self):
         if not _has_rust_image_store():
             return
-        from nitrobox._core import py_image_store_clear
+        from nitrobox._backend import py_image_store_clear
         py_image_store_clear()
 
     def test_get_image_config_from_registry(self):
@@ -706,7 +706,7 @@ class TestRegistryFirstIntegration:
         """get_image_config populates the Rust ImageStore for subsequent lookups."""
         _requires_rust_image_store()
         _skip_if_no_registry()
-        from nitrobox._core import py_image_store_get
+        from nitrobox._backend import py_image_store_get
         from nitrobox.rootfs import get_image_config
 
         # First call: hits registry

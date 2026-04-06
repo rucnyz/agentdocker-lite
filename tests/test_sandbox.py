@@ -857,7 +857,7 @@ class TestRootlessCgroupSetup:
             s._setup_cgroup_rootless()
             assert s._cgroup_path is not None
             # Cleanup the child cgroup we created
-            from nitrobox._core import py_cleanup_cgroup
+            from nitrobox._backend import py_cleanup_cgroup
             py_cleanup_cgroup(str(s._cgroup_path))
         else:
             s._setup_cgroup_rootless()
@@ -958,7 +958,7 @@ class TestMountOverlay:
     def test_single_layer(self, tmp_path):
         """mount_overlay works with a single lowerdir."""
         _requires_root()
-        from nitrobox._core import py_mount_overlay as mount_overlay
+        from nitrobox._backend import py_mount_overlay as mount_overlay
 
         lower = tmp_path / "lower"
         lower.mkdir()
@@ -977,7 +977,7 @@ class TestMountOverlay:
     def test_multi_layer(self, tmp_path):
         """mount_overlay works with multiple lowerdirs (bypasses 256-byte limit)."""
         _requires_root()
-        from nitrobox._core import py_mount_overlay as mount_overlay
+        from nitrobox._backend import py_mount_overlay as mount_overlay
 
         # Create 6 layers — this exceeds the 256-byte fsconfig limit
         layers = []
@@ -1008,7 +1008,7 @@ class TestMountOverlay:
     def test_new_api_detection(self):
         """_check_new_mount_api returns a boolean (True on kernel >= 6.8)."""
         _requires_root()
-        from nitrobox._core import py_check_new_mount_api as _check_new_mount_api
+        from nitrobox._backend import py_check_new_mount_api as _check_new_mount_api
 
         result = _check_new_mount_api()
         assert isinstance(result, bool)
@@ -1021,7 +1021,7 @@ class TestMountOverlay:
         are readable.  Requires root (overlay mount is a privileged op).
         """
         _requires_root()
-        from nitrobox._core import py_mount_overlay, py_umount_lazy
+        from nitrobox._backend import py_mount_overlay, py_umount_lazy
 
         n_layers = 50
         layers_dir = tmp_path / "layers"

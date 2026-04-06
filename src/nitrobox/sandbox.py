@@ -159,7 +159,7 @@ class Sandbox:
         if env_dir and env_dir.exists():
             rootfs = getattr(self, "_rootfs", None)
             if rootfs and not self._userns:
-                from nitrobox._core import py_umount_lazy
+                from nitrobox._backend import py_umount_lazy
                 try:
                     py_umount_lazy(str(rootfs))
                 except OSError:
@@ -322,7 +322,7 @@ class Sandbox:
         shell_pid = self._persistent_shell.pid
 
         if self._userns:
-            from nitrobox._core import py_userns_preexec
+            from nitrobox._backend import py_userns_preexec
 
             _shell_pid = shell_pid
             _rootfs = str(self._rootfs)
@@ -340,7 +340,7 @@ class Sandbox:
             defaults.update(kwargs)
             proc = subprocess.Popen(cmd_args, preexec_fn=_userns_preexec, **defaults)
         else:
-            from nitrobox._core import py_nsenter_preexec
+            from nitrobox._backend import py_nsenter_preexec
 
             _shell_pid = shell_pid
 
@@ -459,7 +459,7 @@ class Sandbox:
             except (OSError, ValueError):
                 pass
 
-        from nitrobox._core import py_process_madvise_cold
+        from nitrobox._backend import py_process_madvise_cold
         return py_process_madvise_cold(pidfd)
 
     # -- Docker image export ----------------------------------------------- #
@@ -505,7 +505,7 @@ class Sandbox:
         # Clean up Rust-side pasta netns bind mount before directory operations.
         netns_file = self._env_dir / ".netns"
         if netns_file.exists():
-            from nitrobox._core import py_umount_lazy
+            from nitrobox._backend import py_umount_lazy
             try:
                 py_umount_lazy(str(netns_file))
             except OSError:
@@ -613,7 +613,7 @@ class Sandbox:
         # Clean up Rust-side pasta netns bind mount (userns mode).
         netns_file = self._env_dir / ".netns"
         if netns_file.exists():
-            from nitrobox._core import py_umount_lazy
+            from nitrobox._backend import py_umount_lazy
             try:
                 py_umount_lazy(str(netns_file))
             except OSError:
@@ -661,7 +661,7 @@ class Sandbox:
         rootfs = getattr(self, "_rootfs", None)
         base_rootfs = getattr(self, "_base_rootfs", None)
         if not self._userns and rootfs:
-            from nitrobox._core import py_umount
+            from nitrobox._backend import py_umount
             try:
                 py_umount(str(rootfs))
             except OSError:
@@ -690,7 +690,7 @@ class Sandbox:
 
         lowerdir_spec = getattr(self, "_lowerdir_spec", None) or base_rootfs
         if not self._userns and rootfs and lowerdir_spec and work:
-            from nitrobox._core import py_mount_overlay
+            from nitrobox._backend import py_mount_overlay
             py_mount_overlay(
                 str(lowerdir_spec), str(upper), str(work), str(rootfs),
             )
@@ -841,7 +841,7 @@ class Sandbox:
 
             rootfs_dir = entry / "rootfs"
             if rootfs_dir.exists():
-                from nitrobox._core import py_umount_recursive_lazy
+                from nitrobox._backend import py_umount_recursive_lazy
                 try:
                     py_umount_recursive_lazy(str(rootfs_dir))
                 except OSError:
@@ -849,7 +849,7 @@ class Sandbox:
 
             netns_path = Path(f"/run/netns/nitrobox-{entry.name}")
             if netns_path.exists():
-                from nitrobox._core import py_fuser_kill, py_umount
+                from nitrobox._backend import py_fuser_kill, py_umount
                 try:
                     py_fuser_kill(str(netns_path))
                 except OSError:
@@ -1421,7 +1421,7 @@ class Sandbox:
         if not any(self._cgroup_limits.values()):
             return
 
-        from nitrobox._core import (
+        from nitrobox._backend import (
             py_apply_cgroup_limits,
             py_cgroup_v2_available,
             py_create_cgroup,
@@ -1455,7 +1455,7 @@ class Sandbox:
         if not self._cgroup_path or not self._cgroup_path.exists():
             return
         try:
-            from nitrobox._core import py_cleanup_cgroup
+            from nitrobox._backend import py_cleanup_cgroup
             py_cleanup_cgroup(str(self._cgroup_path))
         except OSError as e:
             logger.debug("cgroup cleanup (non-fatal): %s", e)
@@ -1467,7 +1467,7 @@ class Sandbox:
         if not any(self._cgroup_limits.values()):
             return
 
-        from nitrobox._core import py_cgroup_v2_available
+        from nitrobox._backend import py_cgroup_v2_available
 
         if not py_cgroup_v2_available():
             logger.warning("cgroup v2 not available -- resource limits not enforced.")
@@ -1491,7 +1491,7 @@ class Sandbox:
             if value:
                 limits[key] = str(value)
         if limits:
-            from nitrobox._core import py_apply_cgroup_limits
+            from nitrobox._backend import py_apply_cgroup_limits
             try:
                 py_apply_cgroup_limits(str(cg_path), limits)
             except OSError as e:
@@ -1619,7 +1619,7 @@ class Sandbox:
         if not shell.alive:
             return
         try:
-            from nitrobox._core import py_userns_fixup_for_delete
+            from nitrobox._backend import py_userns_fixup_for_delete
             py_userns_fixup_for_delete(shell.pid, str(upper))
         except (OSError, ImportError) as e:
             logger.debug("_fixup_userns_permissions: %s", e)
@@ -1637,7 +1637,7 @@ class Sandbox:
         if not shell.alive:
             return
         try:
-            from nitrobox._core import py_userns_fixup_for_delete
+            from nitrobox._backend import py_userns_fixup_for_delete
             py_userns_fixup_for_delete(shell.pid, str(self._env_dir))
         except (OSError, ImportError) as e:
             logger.warning("_fixup_userns_ownership failed: %s", e)
@@ -1730,7 +1730,7 @@ class Sandbox:
         if not any([config.writable_paths, config.readable_paths, config.allowed_ports]):
             return [], [], [], False
 
-        from nitrobox._core import py_landlock_abi_version
+        from nitrobox._backend import py_landlock_abi_version
         abi = py_landlock_abi_version()
         if abi == 0:
             raise SandboxKernelError(

@@ -255,18 +255,18 @@ class TestRustQMP:
 
     def test_binding_importable(self):
         """py_qmp_send is importable from _core."""
-        from nitrobox._core import py_qmp_send
+        from nitrobox._backend import py_qmp_send
         assert callable(py_qmp_send)
 
     def test_nonexistent_socket_raises(self):
         """Connecting to a non-existent socket raises OSError."""
-        from nitrobox._core import py_qmp_send
+        from nitrobox._backend import py_qmp_send
         with pytest.raises(OSError):
             py_qmp_send("/tmp/nonexistent_qmp_socket_12345.sock", '{"execute":"query-status"}')
 
     def test_invalid_socket_path_raises(self):
         """Empty socket path raises OSError."""
-        from nitrobox._core import py_qmp_send
+        from nitrobox._backend import py_qmp_send
         with pytest.raises(OSError):
             py_qmp_send("", '{"execute":"query-status"}')
 
@@ -286,7 +286,7 @@ class TestRustQMP:
                     qmp_socket=qmp_path)
         vm.start(timeout=30)
         try:
-            from nitrobox._core import py_qmp_send
+            from nitrobox._backend import py_qmp_send
             # /vm is bind-mounted to vm_dir on host
             host_sock = Path(vm_dir) / ".nbx_qmp_test.sock"
             if not host_sock.exists():

@@ -61,7 +61,7 @@ def start_pasta_rootful(
 
     # Bind mount the sandbox's netns to /run/netns/ so pasta can open it
     # (pasta's internal sandboxing blocks direct /proc/{pid}/ns/net access).
-    from nitrobox._core import py_bind_mount, py_umount_lazy
+    from nitrobox._backend import py_bind_mount, py_umount_lazy
 
     netns_path = f"/run/netns/{netns_name}"
     os.makedirs("/run/netns", exist_ok=True)
@@ -112,7 +112,7 @@ def start_pasta_rootful(
 def stop_pasta_rootful(netns_path: str | None) -> None:
     """Clean up rootful pasta netns bind mount."""
     if netns_path and os.path.exists(netns_path):
-        from nitrobox._core import py_umount_lazy
+        from nitrobox._backend import py_umount_lazy
         try:
             py_umount_lazy(netns_path)
         except OSError:

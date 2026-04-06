@@ -15,7 +15,7 @@ import pytest
 
 from nitrobox import Sandbox, SandboxConfig
 from nitrobox._errors import SandboxInitError, SandboxKernelError
-from nitrobox._core import py_landlock_abi_version as _landlock_abi_version
+from nitrobox._backend import py_landlock_abi_version as _landlock_abi_version
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -1243,7 +1243,7 @@ class TestLandlockRootful:
         from unittest.mock import patch
         from nitrobox.sandbox import Sandbox
         config = SandboxConfig(image=TEST_IMAGE, writable_paths=["/workspace"])
-        with patch("nitrobox._core.py_landlock_abi_version", return_value=0):
+        with patch("nitrobox._backend.py_landlock_abi_version", return_value=0):
             with pytest.raises(SandboxKernelError, match="Landlock not available"):
                 Sandbox._build_landlock_config(config)
 
@@ -1252,7 +1252,7 @@ class TestLandlockRootful:
         from unittest.mock import patch
         from nitrobox.sandbox import Sandbox
         config = SandboxConfig(image=TEST_IMAGE, allowed_ports=[80])
-        with patch("nitrobox._core.py_landlock_abi_version", return_value=3):
+        with patch("nitrobox._backend.py_landlock_abi_version", return_value=3):
             with pytest.raises(SandboxKernelError, match="ABI v4"):
                 Sandbox._build_landlock_config(config)
 
