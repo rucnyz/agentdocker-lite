@@ -362,139 +362,45 @@ def prepare_rootfs_layers_from_docker(
     cache_dir: Path,
     pull: bool = True,
 ) -> list[Path]:
-    """Extract Docker image as individual cached layers for overlayfs stacking.
+    """Get image layers as directories for overlayfs stacking.
 
-    Priority:
-      0. containers/storage — zero-copy diff paths (no extraction needed)
-      1. Snapshot fast-path — containerd snapshots via docker exec tar
-      2. Docker save — stream compressed layers
-      3. Registry download — pull from remote registry
+    Uses containers/storage for zero-copy layer access:
+      1. Check if image exists in store → return diff paths directly
+      2. Pull from registry into store → return diff paths
+
+    No Docker daemon needed. Layers are user-owned and can be used
+    directly as overlayfs lowerdir.
 
     Args:
-        image_name: Docker image (e.g. ``"ubuntu:22.04"``).
-        cache_dir: Root cache directory (e.g. ``~/.cache/nitrobox/rootfs``).
-        pull: Pull the image first.
+        image_name: Image reference (e.g. ``"ubuntu:22.04"``).
+        cache_dir: Unused (kept for API compatibility). Layers live
+            in the containers/storage graph root.
+        pull: If True, pull from registry when image not in store.
 
     Returns:
-        Ordered list of layer directories (bottom to top) for overlayfs
-        ``lowerdir`` stacking.
-
-    Raises:
-        RuntimeError: If layer extraction fails.
+        Ordered list of layer directories (bottom to top).
     """
-    # Priority 0: containers/storage zero-copy path
-    storage_layers = _try_containers_storage(image_name)
-    if storage_layers is not None:
-        return storage_layers
+    # 1. Check containers/storage
+    layers = _try_containers_storage(image_name)
+    if layers is not None:
+        logger.info("Layer cache ready for %s: %d layers (zero-copy)", image_name, len(layers))
+        return layers
 
-    # Not in store — pull into containers/storage
-    if _containers_storage_pull(image_name):
-        storage_layers = _try_containers_storage(image_name)
-        if storage_layers is not None:
-            return storage_layers
-        logger.debug("Pull succeeded but layers not found in store")
+    # 2. Pull into store
+    if pull:
+        logger.info("Pulling %s into containers/storage", image_name)
+        if not _containers_storage_pull(image_name):
+            raise RuntimeError(
+                f"Failed to pull {image_name!r} into containers/storage. "
+                f"Check network connectivity and image name."
+            )
 
-    # Fallback: Docker-based extraction (existing code)
-    logger.debug("containers/storage unavailable for %s, falling back to Docker", image_name)
-    layers_dir = cache_dir / "layers"
-    layers_dir.mkdir(parents=True, exist_ok=True)
+        layers = _try_containers_storage(image_name)
+        if layers is not None:
+            logger.info("Layer cache ready for %s: %d layers (zero-copy)", image_name, len(layers))
+            return layers
 
-    # Fast path: check manifest from a previous run to skip docker pull
-    # entirely when all layers are already cached.
-    diff_ids = _get_manifest_diff_ids(cache_dir, image_name)
-    if diff_ids:
-        layer_dirs = list(dict.fromkeys(
-            layers_dir / _safe_cache_key(did) for did in diff_ids
-        ))
-        if all(d.exists() for d in layer_dirs):
-            logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
-            return layer_dirs
-
-    # Get diff_ids: manifest cache → ImageStore → registry → Docker API
-    if not diff_ids:
-        diff_ids = _get_image_diff_ids(image_name)
-
-    # Check if all layers are already cached
-    layer_dirs = list(dict.fromkeys(
-        layers_dir / _safe_cache_key(did) for did in diff_ids
-    ))
-    # Get cached config from ImageStore (populated by _get_image_diff_ids)
-    img_config = _image_store_get(image_name)
-
-    if all(d.exists() for d in layer_dirs):
-        logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
-        _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
-        return layer_dirs
-
-    # Need to extract missing layers.
-    needed_keys = {d.name for d in layer_dirs if not d.exists()}
-    _key_to_did = {_safe_cache_key(did): did for did in diff_ids}
-    needed = {_key_to_did[k] for k in needed_keys if k in _key_to_did}
-    logger.info("Extracting layers for %s (%d layers, %d cached)",
-                image_name, len(diff_ids), len(layer_dirs) - len(needed))
-
-    # --- Extraction priority ---
-    # 1. Snapshot fast-path: read pre-extracted layers from containerd
-    #    snapshots via docker exec tar (no gzip, parallel, ~7x faster)
-    # 2. Docker save: stream compressed layers (gzip, sequential)
-    # 3. Registry download: pull from remote registry
-    extracted = False
-    try:
-        extracted = _extract_layers_from_snapshots(
-            image_name, diff_ids, layers_dir,
-        )
-    except Exception as e:
-        logger.debug("Snapshot extraction failed for %s: %s", image_name, e)
-
-    if not extracted:
-        try:
-            if get_client().image_exists(image_name):
-                resp = get_client().image_save(image_name)
-                with tarfile.open(fileobj=resp, mode="r|") as outer_tar:
-                    _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
-                extracted = True
-        except Exception as e:
-            logger.debug("Docker save failed for %s: %s", image_name, e)
-
-    if not extracted:
-        try:
-            _extract_layers_from_registry(image_name, needed, layers_dir)
-        except Exception as e:
-            logger.debug("Registry extraction failed for %s: %s", image_name, e)
-            # Last resort: pull via Docker then save
-            try:
-                if pull:
-                    _pull_or_check_local(image_name)
-                resp = get_client().image_save(image_name)
-                with tarfile.open(fileobj=resp, mode="r|") as outer_tar:
-                    _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
-            except Exception:
-                raise RuntimeError(
-                    f"Cannot extract layers for {image_name!r} from "
-                    f"Docker or registry."
-                ) from e
-
-    # Verify ALL layers were extracted before writing the manifest.
-    still_missing = [d for d in layer_dirs if not d.exists()]
-    if still_missing:
-        names = [d.name for d in still_missing[:3]]
-        raise RuntimeError(
-            f"Layer extraction incomplete for {image_name!r}: "
-            f"{len(still_missing)} layer(s) missing ({', '.join(names)})"
-        )
-
-    _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
-    # Deduplicate layers preserving order (overlayfs ELOOP on duplicate lowerdir).
-    seen: set[Path] = set()
-    unique_dirs: list[Path] = []
-    for d in layer_dirs:
-        if d not in seen:
-            seen.add(d)
-            unique_dirs.append(d)
-    if len(unique_dirs) < len(layer_dirs):
-        logger.debug("Deduplicated %d → %d layers", len(layer_dirs), len(unique_dirs))
-    logger.info("Layer cache ready for %s: %d layers", image_name, len(unique_dirs))
-    return unique_dirs
+    raise RuntimeError(f"Image {image_name!r} not found in containers/storage.")
 
 
 # ======================================================================
