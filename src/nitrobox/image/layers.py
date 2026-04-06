@@ -120,14 +120,13 @@ def _get_store_layers(image_name: str) -> list[Path] | None:
 
 
 def _containers_storage_pull(image_name: str) -> bool:
-    """Pull an image into containers/storage via nitrobox-core image-pull."""
-    bin_path = os.environ.get("NITROBOX_CORE_BIN", "")
-    if not bin_path:
-        candidate = Path(__file__).resolve().parent.parent.parent / "go" / "nitrobox-core"
-        if candidate.is_file():
-            bin_path = str(candidate)
-    if not bin_path:
-        return False
+    """Pull an image into containers/storage via nitrobox-core image-pull.
+
+    Uses subprocess (not os.fork) so it is safe to call from asyncio
+    executor threads.
+    """
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
 
     from nitrobox.config import detect_subuid_range
     subuid = detect_subuid_range()
@@ -150,49 +149,29 @@ def _containers_storage_pull(image_name: str) -> bool:
         "image": image_name,
         "graph_root": str(graph_root),
         "run_root": str(run_root),
-    }).encode()
+    })
 
-    # Fork + unshare(CLONE_NEWUSER) + newuidmap + exec image-pull
-    import ctypes
-    userns_r, userns_w = os.pipe()
-    go_r, go_w = os.pipe()
-    json_r, json_w = os.pipe()
+    # nitrobox-core image-pull uses MaybeReexecUsingUserNamespace()
+    # internally (same as podman/buildah) — no need for os.fork() or
+    # manual unshare/newuidmap from Python.  Config is passed via env
+    # var because stdin doesn't survive the re-exec.
+    env = dict(os.environ)
+    env["_CONTAINERS_ROOTLESS_UID"] = str(outer_uid)
+    env["_NITROBOX_PULL_CONFIG"] = req
+    if "DOCKER_CONFIG" not in env:
+        docker_cfg = Path.home() / ".docker"
+        if (docker_cfg / "config.json").exists():
+            env["DOCKER_CONFIG"] = str(docker_cfg)
 
-    pid = os.fork()
-    if pid == 0:
-        os.close(userns_r); os.close(go_w); os.close(json_w)
-        os.environ["_CONTAINERS_ROOTLESS_UID"] = str(outer_uid)
-        # Let buildah/containers-image read Docker's credentials
-        if "DOCKER_CONFIG" not in os.environ:
-            docker_cfg = Path.home() / ".docker"
-            if (docker_cfg / "config.json").exists():
-                os.environ["DOCKER_CONFIG"] = str(docker_cfg)
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        if libc.unshare(0x10000000) != 0:
-            os._exit(1)
-        os.write(userns_w, b"R"); os.close(userns_w)
-        os.read(go_r, 1); os.close(go_r)
-        os.dup2(json_r, 0); os.close(json_r)
-        os.execvp(bin_path, [bin_path, "image-pull"])
-        os._exit(127)
-
-    os.close(userns_w); os.close(go_r); os.close(json_r)
-    os.read(userns_r, 1); os.close(userns_r)
-
-    subprocess.run(
-        ["newuidmap", str(pid), "0", str(outer_uid), "1", "1", str(sub_start), str(sub_count)],
-        check=False, capture_output=True,
+    r = subprocess.run(
+        [bin_path, "image-pull"],
+        capture_output=True,
+        env=env,
+        timeout=600,
     )
-    subprocess.run(
-        ["newgidmap", str(pid), "0", str(outer_gid), "1", "1", str(sub_start), str(sub_count)],
-        check=False, capture_output=True,
-    )
-
-    os.write(go_w, b"G"); os.close(go_w)
-    os.write(json_w, req); os.close(json_w)
-
-    _, status = os.waitpid(pid, 0)
-    return os.waitstatus_to_exitcode(status) == 0
+    if r.returncode != 0:
+        logger.warning("image-pull failed: %s", r.stderr.decode().strip()[:500])
+    return r.returncode == 0
 
 
 # ====================================================================== #
@@ -315,10 +294,8 @@ def _rmtree_in_userns(path: Path) -> None:
     Uses nitrobox-core subprocess (not fork/unshare from Python) to avoid
     corrupting asyncio's event loop file descriptors.
     """
-    bin_path = os.environ.get("NITROBOX_CORE_BIN", "")
-    if not bin_path:
-        candidate = Path(__file__).resolve().parent.parent.parent / "go" / "nitrobox-core"
-        bin_path = str(candidate) if candidate.is_file() else "nitrobox-core"
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
 
     from nitrobox.config import detect_subuid_range
     subuid = detect_subuid_range()

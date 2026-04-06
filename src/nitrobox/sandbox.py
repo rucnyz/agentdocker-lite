@@ -324,11 +324,8 @@ class Sandbox:
             cmd_args = ["sh", "-c", command]
 
         shell_pid = self._persistent_shell.pid
-        core_bin = os.environ.get("NITROBOX_CORE_BIN")
-        if not core_bin:
-            # Find nitrobox-core binary relative to the package
-            candidate = Path(__file__).resolve().parent.parent.parent / "go" / "nitrobox-core"
-            core_bin = str(candidate) if candidate.is_file() else "nitrobox-core"
+        from nitrobox._gobin import gobin
+        core_bin = gobin()
 
         # Use nitrobox-core with CGO constructor for namespace entry.
         # The C constructor runs before Go's multi-threaded runtime starts,

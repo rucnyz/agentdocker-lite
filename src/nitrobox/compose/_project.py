@@ -13,6 +13,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -320,51 +321,53 @@ class ComposeProject:
             shutil.rmtree(self._volume_dir, ignore_errors=True)
             self._volume_dir = None
 
-        # Remove cached rootfs layers (mirrors docker compose down --rmi)
+        # Remove images from containers/storage (mirrors docker compose down --rmi)
         if rmi is not None:
             self._remove_image_cache(rmi)
 
         logger.info("ComposeProject %s: all services stopped", self._project_name)
 
     def _remove_image_cache(self, mode: str) -> None:
-        """Remove cached rootfs layers for images used by this project.
+        """Remove images from containers/storage used by this project.
 
         Mirrors ``docker compose down --rmi``:
 
-        - ``"all"``: remove layers for all images (pulled + built).
-        - ``"local"``: remove layers only for locally-built images
+        - ``"all"``: remove all images (pulled + built).
+        - ``"local"``: remove only locally-built images
           (those without a ``/`` in the name, i.e. no registry prefix).
-        """
-        from nitrobox.image.store import _safe_cache_key
-        from pathlib import Path
-        import shutil
 
-        # Resolve cache dir from the same config used during sandbox creation.
-        rootfs_cache = self._rootfs_cache_dir
-        if not rootfs_cache:
-            xdg = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-            rootfs_cache = os.path.join(xdg, "nitrobox", "rootfs")
-        layers_dir = Path(rootfs_cache) / "layers"
-        if not layers_dir.exists():
-            return
+        Layers shared with other images are kept (same as ``docker rmi``).
+        """
+        from pathlib import Path
+        import subprocess
+
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
 
         for name, image in self._image_map.items():
             if mode == "local" and "/" in image:
                 continue  # skip registry images in "local" mode
 
             try:
-                from nitrobox.image.store import _get_image_diff_ids
-                from nitrobox.image.layers import remove_layer_locked
-                diff_ids = _get_image_diff_ids(image)
-                for did in set(diff_ids):
-                    layer_dir = layers_dir / _safe_cache_key(did)
-                    if layer_dir.exists():
-                        # Acquires LOCK_EX — blocks until all sandboxes
-                        # using this layer have released their LOCK_SH.
-                        remove_layer_locked(layer_dir)
-                logger.debug("Removed cached layers for %s", image)
+                req = json.dumps({
+                    "image": image,
+                    "run_root": f"/tmp/nitrobox-containers-run-{os.getuid()}",
+                })
+                env = dict(os.environ)
+                env["_NITROBOX_DELETE_CONFIG"] = req
+                r = subprocess.run(
+                    [bin_path, "image-delete"],
+                    capture_output=True,
+                    env=env,
+                    timeout=60,
+                )
+                if r.returncode == 0:
+                    logger.debug("Removed image %s from containers/storage", image)
+                else:
+                    logger.warning("Could not remove image %s: rc=%d %s",
+                                   image, r.returncode, r.stderr.decode().strip()[:200])
             except Exception as e:
-                logger.debug("Could not clean cache for %s: %s", image, e)
+                logger.warning("image cleanup failed for %s: %s", image, e)
 
     def reset(self) -> None:
         """Reset all sandboxes and restart service commands.
@@ -460,10 +463,8 @@ class ComposeProject:
         import subprocess as _sp
         from pathlib import Path
 
-        bin_path = os.environ.get("NITROBOX_CORE_BIN", "")
-        if not bin_path:
-            candidate = Path(__file__).resolve().parent.parent.parent.parent / "go" / "nitrobox-core"
-            bin_path = str(candidate) if candidate.is_file() else "nitrobox-core"
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
 
         from nitrobox.image.layers import _containers_storage_root
         graph_root = _containers_storage_root()

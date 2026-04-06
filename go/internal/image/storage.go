@@ -199,6 +199,60 @@ func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string
 	return imageID, nil
 }
 
+// DeleteImage removes an image and its exclusive layers from the store.
+// Mirrors `docker rmi` / `podman rmi`: layers shared with other images are kept.
+func DeleteImage(store storage.Store, imageRef string) error {
+	img := findImage(store, imageRef)
+	if img == nil {
+		return nil // not found — nothing to delete (matches docker behavior)
+	}
+
+	// store.DeleteImage removes the image and any layers not used by other images.
+	_, err := store.DeleteImage(img.ID, true)
+	return err
+}
+
+// findImage looks up an image by exact name, docker.io-prefixed name, or :latest tag.
+func findImage(store storage.Store, imageRef string) *storage.Image {
+	// Direct lookup first
+	if img, err := store.Image(imageRef); err == nil {
+		return img
+	}
+
+	// Build search variants: "foo/bar:tag" → also try "docker.io/foo/bar:tag"
+	searchNames := []string{imageRef}
+	if !strings.Contains(imageRef, "://") {
+		if !strings.HasPrefix(imageRef, "docker.io/") {
+			if strings.Contains(imageRef, "/") {
+				searchNames = append(searchNames, "docker.io/"+imageRef)
+			} else {
+				searchNames = append(searchNames, "docker.io/library/"+imageRef)
+			}
+		}
+		// Also try with :latest
+		for _, s := range append([]string{}, searchNames...) {
+			if !strings.Contains(s, ":") {
+				searchNames = append(searchNames, s+":latest")
+			}
+		}
+	}
+
+	images, err := store.Images()
+	if err != nil {
+		return nil
+	}
+	for i := range images {
+		for _, name := range images[i].Names {
+			for _, search := range searchNames {
+				if name == search {
+					return &images[i]
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // ListImages returns JSON info about all images in the store.
 func ListImages(store storage.Store) (string, error) {
 	images, err := store.Images()
