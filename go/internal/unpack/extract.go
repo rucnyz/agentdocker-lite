@@ -90,12 +90,28 @@ func ExtractWorker() {
 	usernsPipeW.Write([]byte("R"))
 	usernsPipeW.Close()
 
-	// Wait for UID mapping
+	// Wait for UID mapping from parent
 	buf := make([]byte, 1)
 	goPipeR.Read(buf)
 	goPipeR.Close()
 
-	if err := doExtract(tarPath, dest, maxID); err != nil {
+	// Debug: verify UID/GID mapping is set
+	if data, err := os.ReadFile("/proc/self/uid_map"); err == nil {
+		fmt.Fprintf(os.Stderr, "uid_map: %s", string(data))
+	}
+	if data, err := os.ReadFile("/proc/self/gid_map"); err == nil {
+		fmt.Fprintf(os.Stderr, "gid_map: %s", string(data))
+	}
+	// Test lchown directly
+	tmpf, _ := os.CreateTemp("", "lchown_test")
+	if tmpf != nil {
+		tmpf.Close()
+		err := unix.Lchown(tmpf.Name(), 100, 100)
+		fmt.Fprintf(os.Stderr, "test lchown(100,100): %v\n", err)
+		os.Remove(tmpf.Name())
+	}
+
+	if err := doExtract(tarPath, dest); err != nil {
 		fmt.Fprintf(os.Stderr, "nitrobox: layer extraction failed: %v\n", err)
 		os.Exit(2)
 	}
@@ -195,7 +211,10 @@ func setupIDMapping(childPid int, outerUID, outerGID, subStart, subCount uint32)
 // doExtract is the child-side extraction logic.
 // Uses containers-storage's archive.Unpack() for full compatibility with
 // Podman/Docker layer extraction (UID mapping, whiteout, breakout prevention).
-func doExtract(tarPath, dest string, maxID uint32) error {
+// Runs INSIDE the user namespace (after unshare+newuidmap), so lchown with
+// container UIDs works directly — kernel maps them via the UID mapping.
+// No UIDMaps/GIDMaps needed in TarOptions because we're already in the userns.
+func doExtract(tarPath, dest string) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return err
@@ -220,13 +239,14 @@ func doExtract(tarPath, dest string, maxID uint32) error {
 		reader = bytes.NewReader(data)
 	}
 
-	// Use containers-storage's Unpack — handles everything:
-	// breakout prevention, UID/GID lchown, whiteout conversion,
-	// chmod after chown, deferred dir mtime, PAX xattrs
+	// We run inside the user namespace where we ARE root (uid 0 mapped to
+	// host uid). lchown(uid=1000) works because kernel maps 1000 → host
+	// sub_start+999 via the UID mapping set by newuidmap.
+	// This matches how Podman/buildah extract layers: inside the userns,
+	// tar UIDs are used directly without remapping.
 	opts := &archive.TarOptions{
-		InUserNS:          true,
-		WhiteoutFormat:    archive.OverlayWhiteoutFormat,
-		IgnoreChownErrors: true,
+		InUserNS:       true,
+		WhiteoutFormat: archive.OverlayWhiteoutFormat,
 	}
 	return archive.Unpack(reader, dest, opts)
 }
