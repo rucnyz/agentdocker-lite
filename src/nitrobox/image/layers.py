@@ -386,10 +386,15 @@ def prepare_rootfs_layers_from_docker(
         logger.info("Layer cache ready for %s: %d layers (zero-copy)", image_name, len(layers))
         return layers
 
-    # 2. Pull into store
+    # 2. Pull into store (try registry first, then Docker daemon)
     if pull:
         logger.info("Pulling %s into containers/storage", image_name)
-        if not _containers_storage_pull(image_name):
+        pulled = _containers_storage_pull(image_name)
+        if not pulled:
+            # Fallback: try importing from local Docker daemon
+            logger.debug("Registry pull failed, trying docker-daemon: transport")
+            pulled = _containers_storage_pull(f"docker-daemon:{image_name}")
+        if not pulled:
             raise RuntimeError(
                 f"Failed to pull {image_name!r} into containers/storage. "
                 f"Check network connectivity and image name."

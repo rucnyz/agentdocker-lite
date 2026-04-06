@@ -130,9 +130,10 @@ func ImageLayers(store storage.Store, imageRef string) ([]string, error) {
 func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.SystemContext) error {
 	ctx := context.Background()
 
-	// Parse source reference
+	// Parse source reference.
+	// Supports: "docker://image:tag", "docker-daemon:image:tag", "image:tag" (default docker://)
 	srcName := imageRef
-	if !strings.Contains(srcName, "://") {
+	if !strings.Contains(srcName, "://") && !strings.HasPrefix(srcName, "docker-daemon:") {
 		srcName = "docker://" + srcName
 	}
 	srcRef, err := alltransports.ParseImageName(srcName)
@@ -142,8 +143,9 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 
 	// Destination: use ParseStoreReference with our store (avoids default store init)
 	storageName := imageRef
-	if strings.HasPrefix(storageName, "docker://") {
-		storageName = storageName[len("docker://"):]
+	// Strip transport prefix for storage name
+	for _, prefix := range []string{"docker://", "docker-daemon:"} {
+		storageName = strings.TrimPrefix(storageName, prefix)
 	}
 	stTransport := imgstorage.Transport
 	destRef, err := stTransport.ParseStoreReference(store, storageName)
