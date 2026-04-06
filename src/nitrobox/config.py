@@ -280,7 +280,6 @@ class SandboxConfig:
     fs_backend: str = "overlayfs"
     env_base_dir: str = ""  # resolved in __post_init__
     rootfs_cache_dir: str = ""  # resolved in __post_init__
-    containerd_snapshot: bool = False  # Use containerd snapshot layers (build: images)
     read_only: bool = False
     tmpfs: list[str] = field(default_factory=list)
     shm_size: str | None = None

@@ -594,21 +594,10 @@ class Sandbox:
         # mounts via the setuid helper), force a lazy umount as fallback.
         if self._overlay_mounted and self._rootfs.is_mount():
             try:
-                if getattr(self, "_containerd_image", None):
-                    # Root-mounted overlay — need Docker for umount
-                    env_dir = str(self._env_dir)
-                    subprocess.run(
-                        ["docker", "run", "--rm",
-                         "--cap-add=SYS_ADMIN",
-                         "--mount", f"type=bind,source={env_dir},target=/env,bind-propagation=rshared",
-                         "alpine", "umount", "/env/rootfs"],
-                        capture_output=True, timeout=15,
-                    )
-                else:
-                    subprocess.run(
-                        ["umount", "-l", str(self._rootfs)],
-                        capture_output=True, timeout=5,
-                    )
+                subprocess.run(
+                    ["umount", "-l", str(self._rootfs)],
+                    capture_output=True, timeout=5,
+                )
             except Exception:
                 pass
             self._overlay_mounted = False
@@ -620,14 +609,6 @@ class Sandbox:
                 )
                 self._btrfs_active = False
         self._cleanup_cgroup()
-
-        # Clean up containerd snapshot view.
-        if getattr(self, "_containerd_image", None):
-            from nitrobox.image.layers import cleanup_containerd_view
-            try:
-                cleanup_containerd_view(self._containerd_image)
-            except Exception:
-                pass
 
         # Clean up Rust-side pasta netns bind mount (userns mode).
         netns_file = self._env_dir / ".netns"
@@ -1133,9 +1114,7 @@ class Sandbox:
                 image=config.image,
                 rootfs_cache_dir=rootfs_cache_dir,
                 fs_backend="overlayfs",
-                containerd_snapshot=config.containerd_snapshot,
             )
-            self._containerd_image = config.image if config.containerd_snapshot else None
             if self._layer_dirs:
                 self._lowerdir_spec = ":".join(
                     str(d) for d in reversed(self._layer_dirs)
@@ -1147,13 +1126,6 @@ class Sandbox:
         self._work_dir = self._env_dir / "work"
         for d in (self._upper_dir, self._work_dir, self._rootfs):
             d.mkdir(parents=True, exist_ok=True)
-
-        # For containerd layers: mount overlay via setuid helper from host
-        # namespace (containerd paths are root-owned; userns can't read them).
-        # After mount, clear lowerdir_spec so Rust spawn skips overlay mount.
-        if getattr(self, "_containerd_image", None) and self._layer_dirs:
-            self._mount_containerd_overlay()
-            self._overlay_mounted = True
 
         # --- cgroup via delegation ----------------------------------------
         self._setup_cgroup_rootless()
@@ -1198,11 +1170,9 @@ class Sandbox:
     # ================================================================== #
 
     @staticmethod
-    def _resolve_base_rootfs(image, fs_backend="overlayfs", rootfs_cache_dir=Path(),
-                             containerd_snapshot=False):
+    def _resolve_base_rootfs(image, fs_backend="overlayfs", rootfs_cache_dir=Path()):
         from nitrobox.image.layers import resolve_base_rootfs
-        return resolve_base_rootfs(image, rootfs_cache_dir, fs_backend,
-                                   containerd_snapshot=containerd_snapshot)
+        return resolve_base_rootfs(image, rootfs_cache_dir, fs_backend)
 
     @staticmethod
     def _get_image_digest(image):
@@ -1601,45 +1571,6 @@ class Sandbox:
         from nitrobox.network import stop_pasta_rootful
         stop_pasta_rootful(getattr(self, '_netns_path', None))
         self._netns_path = None
-
-    def _mount_containerd_overlay(self) -> None:
-        """Mount overlay with containerd snapshot layers via Docker.
-
-        Uses ``docker run --cap-add=SYS_ADMIN`` (not --privileged) to mount
-        overlayfs.  Containerd layer dirs are bind-mounted into the helper
-        container as read-only; the overlay target uses ``rshared``
-        propagation so the mount persists on the host after the container
-        exits.  Cleaned up on delete().
-        """
-        # Build volume args: each containerd layer path → /lower_N:ro
-        layer_paths = self._lowerdir_spec.split(":")
-        vol_args: list[str] = []
-        container_lowers: list[str] = []
-        for i, lp in enumerate(layer_paths):
-            container_path = f"/lower_{i}"
-            vol_args.extend(["-v", f"{lp}:{container_path}:ro"])
-            container_lowers.append(container_path)
-        container_lowerdir = ":".join(container_lowers)
-
-        # The sandbox env dir (upper/work/merged) uses rshared propagation
-        env_dir = str(self._env_dir)
-        cmd = [
-            "docker", "run", "--rm",
-            "--cap-add=SYS_ADMIN",
-            "--security-opt=apparmor=unconfined",
-        ] + vol_args + [
-            "--mount", f"type=bind,source={env_dir},target=/env,bind-propagation=rshared",
-            "alpine", "mount", "-t", "overlay", "overlay",
-            "-o", f"lowerdir={container_lowerdir},upperdir=/env/upper,workdir=/env/work",
-            "/env/rootfs",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Docker overlay mount failed: {result.stderr.strip()[:200]}"
-            )
-        # Clear lowerdir_spec so Rust spawn skips its own overlay mount
-        self._lowerdir_spec = None
 
     @staticmethod
     def _find_pasta_bin() -> str | None:

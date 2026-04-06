@@ -298,81 +298,7 @@ def prepare_rootfs_layers_from_docker(
     return unique_dirs
 
 
-# ====================================================================== #
-#  Containerd snapshot path (zero-copy, for docker-built images)           #
-# ====================================================================== #
-
-# Active containerd views: image_name → view_key (for cleanup)
-_active_containerd_views: dict[str, str] = {}
-
-
-def _find_checkpoint_helper() -> str | None:
-    """Find the setuid checkpoint helper binary."""
-    import shutil
-    for name in ["nitrobox-checkpoint-helper"]:
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
-
-
-def resolve_layers_from_containerd(image_name: str) -> tuple[list[Path], str] | None:
-    """Get layer directories directly from containerd's snapshot store.
-
-    Uses the setuid checkpoint helper to call ``ctr`` (needs root).
-    Returns ``(layer_paths, view_key)`` or ``None`` if unavailable.
-    Layer paths are in top-to-bottom order (matching containerd's output).
-    """
-    helper = _find_checkpoint_helper()
-    if not helper:
-        logger.debug("Checkpoint helper not found, skipping containerd path")
-        return None
-
-    view_key = f"nitrobox-{os.getpid()}-{int(time.monotonic_ns())}"
-
-    try:
-        result = subprocess.run(
-            [helper, "snapshot-mounts", "--image", image_name, "--view-key", view_key],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        logger.debug("Containerd snapshot helper failed: %s", e)
-        return None
-
-    if result.returncode != 0:
-        logger.debug("Containerd snapshot unavailable for %s: %s",
-                      image_name, result.stderr.strip()[:200])
-        return None
-
-    paths = [Path(line.strip()) for line in result.stdout.strip().splitlines() if line.strip()]
-    if not paths:
-        return None
-
-    # Paths are root-owned (0700) — we can't stat them from userspace.
-    # Trust the helper output; the overlay mount will go through the
-    # setuid helper's mount-overlay subcommand which has root access.
-    logger.info("Resolved %d layers from containerd for %s", len(paths), image_name)
-    _active_containerd_views[image_name] = view_key
-    return paths, view_key
-
-
-def cleanup_containerd_view(view_key_or_image: str) -> None:
-    """Remove a containerd snapshot view (cleanup on sandbox delete)."""
-    # Accept either a view_key directly or an image name (looks up in registry)
-    view_key = _active_containerd_views.pop(view_key_or_image, view_key_or_image)
-    helper = _find_checkpoint_helper()
-    if not helper:
-        return
-    try:
-        subprocess.run(
-            [helper, "snapshot-remove", view_key],
-            capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
-
-
-# ====================================================================== #
+# ======================================================================
 #  Internal — layer extraction & cache management                          #
 # ====================================================================== #
 
@@ -747,8 +673,6 @@ def resolve_base_rootfs(
     image: str,
     rootfs_cache_dir: Path,
     fs_backend: str = "overlayfs",
-    *,
-    containerd_snapshot: bool = False,
 ) -> tuple[Path, list[Path] | None]:
     """Resolve the base rootfs for a sandbox."""
     candidate = Path(image)
@@ -760,17 +684,6 @@ def resolve_base_rootfs(
 
     # --- overlayfs: layer-level caching ---
     t0 = time.monotonic()
-    if containerd_snapshot:
-        result = resolve_layers_from_containerd(image)
-        if result is not None:
-            layer_dirs = result[0]
-            elapsed_ms = (time.monotonic() - t0) * 1000
-            logger.info(
-                "Layer cache ready (%.1fms, containerd): %s (%d layers)",
-                elapsed_ms, image, len(layer_dirs),
-            )
-            return layer_dirs[0], layer_dirs
-
     layer_dirs = prepare_rootfs_layers_from_docker(
         image, rootfs_cache_dir, pull=True,
     )

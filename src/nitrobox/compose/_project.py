@@ -152,7 +152,6 @@ class ComposeProject:
             compose_files, self._env,
         )
         self._startup_order = _topo_sort(self._defs)
-        self._containerd_images: set[str] = set()  # images with containerd snapshots
         self._image_map = self._resolve_image_map()
         self._image_cmds: dict[str, list[str] | None] = {}  # service → image CMD
         self._image_entrypoints: dict[str, list[str] | None] = {}  # service → image ENTRYPOINT
@@ -456,9 +455,6 @@ class ComposeProject:
                 tag=image_name,
                 build_args=build_args,
             )
-            # After docker build, layers are in containerd's snapshot store.
-            # Signal this for zero-copy rootfs resolution (no docker save).
-            self._containerd_images.add(image_name)
 
         return mapping
 
@@ -585,7 +581,6 @@ class ComposeProject:
             seccomp=seccomp,
             hostname=svc.hostname or svc.name,
             dns=svc.dns,
-            containerd_snapshot=image in self._containerd_images,
         )
         if svc.shm_size:
             config_kwargs["shm_size"] = svc.shm_size
