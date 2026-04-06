@@ -179,11 +179,15 @@ func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string
 	ctx := context.Background()
 
 	opts := define.BuildOptions{
-		Output:           tag,
-		ContextDirectory: contextDir,
-		CommonBuildOpts:  &define.CommonBuildOptions{},
-		Layers:           true,
+		Output:                 tag,
+		ContextDirectory:       contextDir,
+		CommonBuildOpts:        &define.CommonBuildOptions{},
+		Layers:                 true,
 		RemoveIntermediateCtrs: true,
+		// IsolationChroot: RUN instructions execute in a chroot, inheriting
+		// host networking directly. No netavark/pasta/CNI needed for builds.
+		// Network isolation is handled at sandbox runtime (by pasta), not build time.
+		Isolation: define.IsolationChroot,
 	}
 
 	imageID, _, err := imagebuildah.BuildDockerfiles(ctx, store, opts, dockerfile)
