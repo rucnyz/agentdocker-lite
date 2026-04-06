@@ -440,7 +440,9 @@ func mountOverlayFs(config *SpawnConfig) error {
 	upper := *config.UpperDir
 	work := *config.WorkDir
 
-	// Fix 000-perm dirs
+	// Fix 000-perm dirs left by previous overlayfs.
+	// Uses exec.Command (matching Rust) — consumes PID 2 in the namespace,
+	// which keeps PID numbering consistent for CRIU checkpoint/restore.
 	exec.Command("chmod", "-R", "700", work).Run()
 	workInner := work + "/work"
 	os.RemoveAll(workInner)
