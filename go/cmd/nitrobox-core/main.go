@@ -13,11 +13,10 @@ import (
 	"go.podman.io/storage/pkg/unshare"
 
 	"github.com/opensage-agent/nitrobox/go/internal/cgroup"
-	nbxckpt "github.com/opensage-agent/nitrobox/go/internal/checkpoint"
 	nbximage "github.com/opensage-agent/nitrobox/go/internal/image"
 	"github.com/opensage-agent/nitrobox/go/internal/imageref"
 	"github.com/opensage-agent/nitrobox/go/internal/mount"
-	"github.com/opensage-agent/nitrobox/go/internal/nsenter"
+	_ "github.com/opensage-agent/nitrobox/go/internal/nsenter" // CGO constructor for namespace entry
 	"github.com/opensage-agent/nitrobox/go/internal/pidfd"
 	"github.com/opensage-agent/nitrobox/go/internal/proc"
 	"github.com/opensage-agent/nitrobox/go/internal/qmp"
@@ -528,75 +527,6 @@ func main() {
 	})
 
 	// --- nsenter ---
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "nsenter-preexec",
-		Short: "Enter mount namespace and chroot (rootful popen)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var req struct {
-				TargetPid int `json:"target_pid"`
-			}
-			if err := readJSON(&req); err != nil {
-				return err
-			}
-			return nsenter.NsenterPreexec(req.TargetPid)
-		},
-	})
-
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "userns-preexec",
-		Short: "Enter user+mount namespace and chroot (userns popen)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var req struct {
-				TargetPid  int    `json:"target_pid"`
-				Rootfs     string `json:"rootfs"`
-				WorkingDir string `json:"working_dir"`
-			}
-			if err := readJSON(&req); err != nil {
-				return err
-			}
-			return nsenter.UsersPreexec(req.TargetPid, req.Rootfs, req.WorkingDir)
-		},
-	})
-
-	rootCmd.AddCommand(&cobra.Command{
-		Use:                "nsenter-exec",
-		Short:              "Enter namespace and exec command",
-		DisableFlagParsing: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Usage: nsenter-exec --pid N [--rootful|--rootfs PATH --workdir PATH] -- cmd args...
-			var targetPid int
-			var rootful bool
-			var rootfs, workDir string
-			var cmdArgs []string
-
-			i := 0
-			for i < len(args) {
-				switch args[i] {
-				case "--pid":
-					i++
-					fmt.Sscanf(args[i], "%d", &targetPid)
-				case "--rootful":
-					rootful = true
-				case "--rootfs":
-					i++
-					rootfs = args[i]
-				case "--workdir":
-					i++
-					workDir = args[i]
-				case "--":
-					cmdArgs = args[i+1:]
-					i = len(args)
-					continue
-				}
-				i++
-			}
-			if len(cmdArgs) == 0 {
-				return fmt.Errorf("no command specified after --")
-			}
-			return nsenter.NsenterExec(targetPid, rootful, rootfs, workDir, cmdArgs)
-		},
-	})
-
 	// --- sandbox spawn ---
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "spawn",
@@ -818,39 +748,6 @@ func main() {
 			}
 			fmt.Println(result)
 			return nil
-		},
-	})
-
-	// --- checkpoint (CRIU) ---
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "checkpoint-dump",
-		Short: "Checkpoint a sandbox process tree using CRIU",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var opts nbxckpt.DumpOpts
-			if err := readJSON(&opts); err != nil {
-				return err
-			}
-			result, err := nbxckpt.Dump(opts)
-			if err != nil {
-				return err
-			}
-			return writeJSON(result)
-		},
-	})
-
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "checkpoint-restore",
-		Short: "Restore a sandbox from a CRIU checkpoint",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var opts nbxckpt.RestoreOpts
-			if err := readJSON(&opts); err != nil {
-				return err
-			}
-			result, err := nbxckpt.Restore(opts)
-			if err != nil {
-				return err
-			}
-			return writeJSON(result)
 		},
 	})
 

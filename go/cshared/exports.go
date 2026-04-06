@@ -23,7 +23,6 @@ import (
 	"github.com/opensage-agent/nitrobox/go/internal/proc"
 	"github.com/opensage-agent/nitrobox/go/internal/qmp"
 	"github.com/opensage-agent/nitrobox/go/internal/security"
-	"github.com/opensage-agent/nitrobox/go/internal/unpack"
 	"github.com/opensage-agent/nitrobox/go/internal/userns"
 	"github.com/opensage-agent/nitrobox/go/internal/whiteout"
 )
@@ -335,20 +334,6 @@ func NbxUsernFixupForDelete(usernsPid C.int, dirPath *C.char, outCount *C.uint) 
 	return nil
 }
 
-//export NbxExtractTarInUserns
-func NbxExtractTarInUserns(tarPath, dest *C.char, outerUID, outerGID, subStart, subCount C.uint) *C.char {
-	return errStr(unpack.ExtractTarInUserns(
-		C.GoString(tarPath), C.GoString(dest),
-		uint32(outerUID), uint32(outerGID), uint32(subStart), uint32(subCount),
-	))
-}
-
-//export NbxRmtreeInUserns
-func NbxRmtreeInUserns(path *C.char, outerUID, outerGID, subStart, subCount C.uint) *C.char {
-	return errStr(unpack.RmtreeInUserns(
-		C.GoString(path), uint32(outerUID), uint32(outerGID), uint32(subStart), uint32(subCount),
-	))
-}
 
 // ======================================================================
 // Spawn — uses JSON config because of the large number of parameters

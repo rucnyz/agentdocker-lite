@@ -1106,7 +1106,7 @@ class Sandbox:
 
         # --- rootfs -------------------------------------------------------
         rootfs_cache_dir = Path(config.rootfs_cache_dir)
-        from nitrobox.rootfs import _detect_whiteout_strategy
+        from nitrobox.storage.whiteout import _detect_whiteout_strategy
         whiteout_strategy = _detect_whiteout_strategy()
 
         if whiteout_strategy == "none":
