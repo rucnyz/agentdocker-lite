@@ -596,6 +596,7 @@ fn py_parse_image_ref(image: &str) -> PyResult<(String, String, String)> {
 #[pyfunction]
 #[pyo3(signature = (tar_path, dest, outer_uid, outer_gid, sub_start, sub_count))]
 fn py_extract_tar_in_userns(
+    py: Python<'_>,
     tar_path: &str,
     dest: &str,
     outer_uid: u32,
@@ -603,8 +604,14 @@ fn py_extract_tar_in_userns(
     sub_start: u32,
     sub_count: u32,
 ) -> PyResult<()> {
-    unpack::extract_tar_in_userns(tar_path, dest, outer_uid, outer_gid, sub_start, sub_count)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    // Release the GIL so other Python threads (e.g. FIFO writers) can run
+    // while we fork + extract.
+    let tp = tar_path.to_owned();
+    let ds = dest.to_owned();
+    py.detach(|| {
+        unpack::extract_tar_in_userns(&tp, &ds, outer_uid, outer_gid, sub_start, sub_count)
+    })
+    .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 /// Remove a directory tree containing files with mapped UIDs.

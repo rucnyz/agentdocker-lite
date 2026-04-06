@@ -2516,3 +2516,133 @@ class TestDockerParity:
                 f"Mismatch on {name}: nitrobox={nbx_results[name]!r}, "
                 f"docker={docker_results[name]!r}"
             )
+
+
+# ------------------------------------------------------------------ #
+#  Concurrent sandbox tests with shared layers                          #
+# ------------------------------------------------------------------ #
+
+
+class TestConcurrentSharedLayers:
+    """Verify sandboxes with similar images (shared base layers) work concurrently.
+
+    Simulates the swebench pattern where multiple tasks use images from the
+    same project (e.g. matplotlib) that share most of their base layers
+    but differ in the top few layers.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_docker_or_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("concurrent layer tests run as non-root")
+        _requires_docker()
+
+    def test_concurrent_sandboxes_shared_layers(self, tmp_path, shared_cache_dir):
+        """Start 4 sandboxes concurrently from images that share base layers."""
+        import concurrent.futures
+
+        # Use the same base image with different names to simulate
+        # shared layers.  TEST_IMAGE is pulled once; we tag it 4 times
+        # to create 4 "different" images that share all layers.
+        tags = [f"concurrent-test-{i}:latest" for i in range(4)]
+        for tag in tags:
+            subprocess.run(
+                ["docker", "tag", TEST_IMAGE, tag],
+                capture_output=True, check=True,
+            )
+
+        sandboxes = []
+        try:
+            configs = [
+                SandboxConfig(
+                    image=tag,
+                    working_dir="/workspace",
+                    env_base_dir=str(tmp_path / f"env-{i}"),
+                    rootfs_cache_dir=shared_cache_dir,
+                )
+                for i, tag in enumerate(tags)
+            ]
+
+            # Start all 4 in parallel threads
+            def _start(i, config):
+                box = Sandbox(config, name=f"concurrent-{i}")
+                return box
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [pool.submit(_start, i, c) for i, c in enumerate(configs)]
+                for f in concurrent.futures.as_completed(futures):
+                    sandboxes.append(f.result())
+
+            # All 4 should be running — verify each can execute commands
+            for i, box in enumerate(sandboxes):
+                out, ec = box.run(f"echo sandbox-{i}")
+                assert ec == 0, f"sandbox-{i} failed with exit code {ec}"
+                assert f"sandbox-{i}" in out
+
+            # Verify each has its own writable layer (changes don't leak)
+            for i, box in enumerate(sandboxes):
+                box.run(f"echo marker-{i} > /tmp/marker.txt")
+
+            for i, box in enumerate(sandboxes):
+                out, _ = box.run("cat /tmp/marker.txt")
+                assert f"marker-{i}" in out, (
+                    f"sandbox-{i} sees wrong marker: {out!r}"
+                )
+
+        finally:
+            for box in sandboxes:
+                try:
+                    box.delete()
+                except Exception:
+                    pass
+            for tag in tags:
+                subprocess.run(["docker", "rmi", tag], capture_output=True)
+
+    def test_delete_during_concurrent_use(self, tmp_path, shared_cache_dir):
+        """Deleting one sandbox doesn't break another using shared layers."""
+        import concurrent.futures
+
+        tags = [f"del-test-{i}:latest" for i in range(2)]
+        for tag in tags:
+            subprocess.run(
+                ["docker", "tag", TEST_IMAGE, tag],
+                capture_output=True, check=True,
+            )
+
+        sandboxes = []
+        try:
+            configs = [
+                SandboxConfig(
+                    image=tag,
+                    working_dir="/workspace",
+                    env_base_dir=str(tmp_path / f"del-env-{i}"),
+                    rootfs_cache_dir=shared_cache_dir,
+                )
+                for i, tag in enumerate(tags)
+            ]
+
+            # Start both
+            for i, config in enumerate(configs):
+                sandboxes.append(Sandbox(config, name=f"del-test-{i}"))
+
+            # Both work
+            for box in sandboxes:
+                out, ec = box.run("echo alive")
+                assert ec == 0
+
+            # Delete first while second is still running
+            sandboxes[0].delete()
+
+            # Second should still work (shared layers protected by flock)
+            out, ec = sandboxes[1].run("echo still-alive")
+            assert ec == 0
+            assert "still-alive" in out
+
+        finally:
+            for box in sandboxes:
+                try:
+                    box.delete()
+                except Exception:
+                    pass
+            for tag in tags:
+                subprocess.run(["docker", "rmi", tag], capture_output=True)

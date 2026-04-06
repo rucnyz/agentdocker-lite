@@ -235,27 +235,35 @@ def prepare_rootfs_layers_from_docker(
         _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
         return layer_dirs
 
-    # Need to extract missing layers.  Iterate over the deduplicated
-    # layer_dirs — NOT zip(diff_ids, layer_dirs) which misaligns when
-    # the image has duplicate diff-ids.
+    # Need to extract missing layers.
     needed_keys = {d.name for d in layer_dirs if not d.exists()}
-    # Map cache keys back to full diff_ids for the registry downloader.
     _key_to_did = {_safe_cache_key(did): did for did in diff_ids}
     needed = {_key_to_did[k] for k in needed_keys if k in _key_to_did}
     logger.info("Extracting layers for %s (%d layers, %d cached)",
                 image_name, len(diff_ids), len(layer_dirs) - len(needed))
 
-    # Primary: local Docker cache (docker save — pure local IO, fastest)
-    # Fallback: registry download (network, slower)
+    # --- Extraction priority ---
+    # 1. Snapshot fast-path: read pre-extracted layers from containerd
+    #    snapshots via docker exec tar (no gzip, parallel, ~7x faster)
+    # 2. Docker save: stream compressed layers (gzip, sequential)
+    # 3. Registry download: pull from remote registry
     extracted = False
     try:
-        if get_client().image_exists(image_name):
-            resp = get_client().image_save(image_name)
-            with tarfile.open(fileobj=resp, mode="r|") as outer_tar:
-                _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
-            extracted = True
+        extracted = _extract_layers_from_snapshots(
+            image_name, diff_ids, layers_dir,
+        )
     except Exception as e:
-        logger.debug("Docker save failed for %s: %s", image_name, e)
+        logger.debug("Snapshot extraction failed for %s: %s", image_name, e)
+
+    if not extracted:
+        try:
+            if get_client().image_exists(image_name):
+                resp = get_client().image_save(image_name)
+                with tarfile.open(fileobj=resp, mode="r|") as outer_tar:
+                    _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
+                extracted = True
+        except Exception as e:
+            logger.debug("Docker save failed for %s: %s", image_name, e)
 
     if not extracted:
         try:
@@ -515,21 +523,14 @@ def _extract_single_layer_locked(
     layers_dir: Path,
 ) -> None:
     """Extract a single layer tarball with file locking for concurrent safety."""
-    import threading
-    tid = threading.current_thread().name
     lock_path = layers_dir / f".{layer_dir.name}.lock"
     tmp_dir = layer_dir.with_suffix(".extracting")
-    import threading, sys
-    tid = threading.current_thread().name
-    print(f"[{tid}] LOCK {layer_dir.name[:16]}... blob={len(raw)}", file=sys.stderr, flush=True)
     with open(lock_path, "w") as lock_fd:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
             if layer_dir.exists():
-                print(f"[{tid}] SKIP {layer_dir.name[:16]}... (cached)", file=sys.stderr, flush=True)
                 return
 
-            print(f"[{tid}] EXTRACT {layer_dir.name[:16]}... ({len(raw)} bytes)", file=sys.stderr, flush=True)
             if tmp_dir.exists():
                 _rmtree_mapped(tmp_dir)
             tmp_dir.mkdir(parents=True)
@@ -543,16 +544,12 @@ def _extract_single_layer_locked(
                 _convert_whiteouts_in_layer(tmp_dir)
 
             tmp_dir.rename(layer_dir)
-            n_files = sum(1 for _ in layer_dir.rglob("*") if _.is_file())
-            print(f"[{tid}] DONE {layer_dir.name[:16]}... ({n_files} files)", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"[{tid}] FAIL {layer_dir.name[:16]}... {e}", file=sys.stderr, flush=True)
+        except Exception:
             if tmp_dir.exists():
                 _rmtree_mapped(tmp_dir)
             raise
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    # Clean up lock file (best effort)
     try:
         lock_path.unlink()
     except OSError:
@@ -599,6 +596,309 @@ def _extract_tar_in_userns(raw: bytes, dest_dir: Path) -> None:
         )
     finally:
         tar_path.unlink(missing_ok=True)
+
+
+# ======================================================================
+#  Snapshot-based extraction (zero-decompress fast path)                  #
+# ======================================================================
+#
+# When Docker (with containerd snapshotter) already has an image pulled,
+# its layers are stored as pre-extracted directories under:
+#   /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/{id}/fs/
+#
+# These directories are root-owned and inaccessible directly, but we can
+# reach them via Docker bind-mounts.  This skips the entire
+# docker-save → gzip-decompress → tar-extract pipeline (~7x faster).
+#
+# Flow:
+#   1. docker create + start <image> → parse /proc/{pid}/mountinfo
+#      to discover snapshot paths for each layer
+#   2. docker create a "proxy" alpine container that bind-mounts every
+#      snapshot dir
+#   3. docker exec proxy tar c -C /l{i} .  →  pipe to userns extractor
+#      (parallel, one thread per layer)
+#   4. Clean up both containers
+
+
+def _discover_snapshot_paths(image_name: str) -> list[str] | None:
+    """Start a temporary container to discover containerd snapshot paths.
+
+    Returns an ordered list of snapshot ``fs/`` paths (bottom-to-top,
+    matching diff_id order), or *None* if discovery fails.
+    """
+    import re
+
+    client = get_client()
+    cid = None
+    try:
+        cid = client.container_create(image_name, command=["sleep", "30"])
+        client.container_start(cid)
+        info = client.container_inspect(cid)
+        pid = info.get("State", {}).get("Pid")
+        if not pid:
+            return None
+
+        # Parse overlay lowerdir from mountinfo
+        mountinfo = Path(f"/proc/{pid}/mountinfo").read_text()
+        lowerdirs: list[str] = []
+        for line in mountinfo.splitlines():
+            if "overlay" in line and "lowerdir=" in line:
+                m = re.search(r"lowerdir=([^ ,]+)", line)
+                if m:
+                    lowerdirs = m.group(1).split(":")
+                break
+
+        if not lowerdirs:
+            return None
+
+        return lowerdirs
+    except Exception as exc:
+        logger.debug("Snapshot discovery failed for %s: %s", image_name, exc)
+        return None
+    finally:
+        if cid:
+            # Force-remove (skip graceful stop — saves ~1s).
+            try:
+                client.container_remove(cid, force=True)
+            except Exception:
+                pass
+
+
+def _map_snapshots_to_diff_ids(
+    lowerdirs: list[str],
+    diff_ids: list[str],
+) -> list[tuple[str, str]] | None:
+    """Map containerd snapshot lowerdir paths to image diff_ids.
+
+    The overlay lowerdir list is top-to-bottom (newest first).
+    Docker adds init layers at the top (typically 3).  We skip those,
+    reverse the remaining, and zip with diff_ids (which are bottom-to-top).
+
+    Returns list of ``(diff_id, snapshot_path)`` pairs, or None on mismatch.
+    """
+    n_image = len(diff_ids)
+    n_extra = len(lowerdirs) - n_image
+    if n_extra < 0:
+        logger.debug(
+            "Fewer lowerdirs (%d) than diff_ids (%d) — cannot map",
+            len(lowerdirs), n_image,
+        )
+        return None
+
+    # Image layers are the bottom N entries of the lowerdir list.
+    # Reverse them to get bottom-to-top order matching diff_ids.
+    image_lowerdirs = list(reversed(lowerdirs[n_extra:]))
+    return list(zip(diff_ids, image_lowerdirs))
+
+
+def _extract_layers_from_snapshots(
+    image_name: str,
+    diff_ids: list[str],
+    layers_dir: Path,
+) -> bool:
+    """Extract uncached layers directly from containerd snapshots.
+
+    Returns True if all layers were extracted successfully.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    t0 = time.monotonic()
+    lowerdirs = _discover_snapshot_paths(image_name)
+    if not lowerdirs:
+        return False
+
+    mapping = _map_snapshots_to_diff_ids(lowerdirs, diff_ids)
+    if not mapping:
+        return False
+
+    # Identify which layers still need extraction.
+    needed: list[tuple[str, str]] = []  # (diff_id, snapshot_path)
+    for diff_id, snap_path in mapping:
+        layer_dir = layers_dir / _safe_cache_key(diff_id)
+        if not layer_dir.exists():
+            needed.append((diff_id, snap_path))
+
+    if not needed:
+        logger.info("Snapshot fast-path: all %d layers cached", len(diff_ids))
+        return True
+
+    t_discover = time.monotonic() - t0
+    logger.info(
+        "Snapshot fast-path: %d/%d layers to extract (discovery %.1fs)",
+        len(needed), len(diff_ids), t_discover,
+    )
+
+    # Create proxy container that bind-mounts every needed snapshot dir.
+    client = get_client()
+    binds: list[str] = []
+    idx_map: dict[str, int] = {}  # diff_id → mount index
+    for i, (diff_id, snap_path) in enumerate(needed):
+        binds.append(f"{snap_path}:/l{i}:ro")
+        idx_map[diff_id] = i
+
+    proxy_cid = None
+    try:
+        proxy_cid = client.container_create(
+            "alpine:latest",
+            command=["sleep", "3600"],
+            binds=binds,
+        )
+        client.container_start(proxy_cid)
+
+        # Give the container a moment to be ready for exec.
+        # (In practice, sleep is ready instantly, but be safe.)
+        time.sleep(0.1)
+
+        def _extract_one(diff_id: str) -> tuple[str, float]:
+            idx = idx_map[diff_id]
+            layer_dir = layers_dir / _safe_cache_key(diff_id)
+            tmp_dir = layer_dir.with_suffix(".extracting")
+
+            if layer_dir.exists():
+                return diff_id, 0.0
+
+            if tmp_dir.exists():
+                _rmtree_mapped(tmp_dir)
+            tmp_dir.mkdir(parents=True)
+
+            t_start = time.monotonic()
+            try:
+                _extract_snapshot_layer(proxy_cid, idx, tmp_dir)
+                tmp_dir.rename(layer_dir)
+            except Exception:
+                if tmp_dir.exists():
+                    _rmtree_mapped(tmp_dir)
+                raise
+            return diff_id, time.monotonic() - t_start
+
+        errors: list[str] = []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {
+                pool.submit(_extract_one, did): did
+                for did, _ in needed
+            }
+            for future in as_completed(futures):
+                did = futures[future]
+                try:
+                    _, elapsed = future.result()
+                    cache_key = _safe_cache_key(did)[:16]
+                    if elapsed > 0:
+                        logger.debug(
+                            "Snapshot extract %s: %.1fs", cache_key, elapsed,
+                        )
+                except Exception as exc:
+                    errors.append(f"{did[:16]}: {exc}")
+                    logger.debug("Snapshot extract failed %s: %s", did[:16], exc)
+
+        if errors:
+            logger.warning(
+                "Snapshot extraction had %d errors, falling back", len(errors),
+            )
+            return False
+
+        total = time.monotonic() - t0
+        logger.info(
+            "Snapshot fast-path complete: %d layers in %.1fs", len(needed), total,
+        )
+        return True
+
+    except Exception as exc:
+        logger.debug("Snapshot proxy failed: %s", exc)
+        return False
+    finally:
+        if proxy_cid:
+            try:
+                client.container_remove(proxy_cid, force=True)
+            except Exception:
+                pass
+
+
+def _extract_snapshot_layer(
+    proxy_cid: str,
+    mount_idx: int,
+    dest_dir: Path,
+) -> None:
+    """Extract a single snapshot layer via ``docker exec tar`` into *dest_dir*.
+
+    The proxy container has the snapshot mounted at ``/l{mount_idx}``.
+    Uses a named FIFO to pipe ``docker exec tar`` directly into the Rust
+    userns extractor — no temp file, no memory buffering.
+    """
+    import threading
+    from nitrobox.config import detect_subuid_range
+
+    subuid_range = detect_subuid_range()
+    fifo_path = dest_dir.parent / f".{dest_dir.name}.snap.fifo"
+    use_fifo = bool(subuid_range) and os.geteuid() != 0
+
+    if use_fifo:
+        try:
+            fifo_path.unlink(missing_ok=True)
+            os.mkfifo(fifo_path)
+        except OSError:
+            use_fifo = False
+
+    if use_fifo:
+        outer_uid, sub_start, sub_count = subuid_range  # type: ignore[misc]
+        outer_gid = os.getgid()
+
+        # Writer thread: open(fifo, "wb") blocks until the Rust extractor
+        # (forked child) opens the read end.  Must be in a separate thread
+        # so the main thread can call py_extract_tar_in_userns.
+        writer_exc: list[BaseException | None] = [None]
+
+        def _writer() -> None:
+            try:
+                with open(fifo_path, "wb") as wf:
+                    proc = subprocess.run(
+                        ["docker", "exec", proxy_cid,
+                         "tar", "c", "-C", f"/l{mount_idx}", "."],
+                        stdout=wf, stderr=subprocess.PIPE, timeout=300,
+                    )
+                if proc.returncode != 0:
+                    writer_exc[0] = RuntimeError(
+                        f"docker exec tar rc={proc.returncode}: "
+                        f"{proc.stderr.decode(errors='replace')[:200]}"
+                    )
+            except Exception as exc:
+                writer_exc[0] = exc
+
+        wt = threading.Thread(target=_writer, daemon=True)
+        wt.start()
+        try:
+            from nitrobox._core import py_extract_tar_in_userns
+            py_extract_tar_in_userns(
+                str(fifo_path), str(dest_dir),
+                outer_uid, outer_gid, sub_start, sub_count,
+            )
+        finally:
+            wt.join(timeout=60)
+            fifo_path.unlink(missing_ok=True)
+
+        if writer_exc[0] is not None:
+            raise writer_exc[0]
+    else:
+        # Fallback: temp file (rootful or no userns).
+        tar_path = dest_dir.parent / f".{dest_dir.name}.snap.tar"
+        try:
+            with open(tar_path, "wb") as f:
+                proc = subprocess.run(
+                    ["docker", "exec", proxy_cid,
+                     "tar", "c", "-C", f"/l{mount_idx}", "."],
+                    stdout=f, stderr=subprocess.PIPE, timeout=300,
+                )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"docker exec tar failed (rc={proc.returncode}): "
+                    f"{proc.stderr.decode(errors='replace')[:200]}"
+                )
+            with tarfile.open(str(tar_path), mode="r:") as lt:
+                lt.extractall(dest_dir, filter="tar")
+            if os.geteuid() == 0:
+                from nitrobox.storage.whiteout import _convert_whiteouts_in_layer
+                _convert_whiteouts_in_layer(dest_dir)
+        finally:
+            tar_path.unlink(missing_ok=True)
 
 
 def _pull_or_check_local(image_name: str, **_kwargs: object) -> None:

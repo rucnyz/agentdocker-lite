@@ -477,12 +477,27 @@ class DockerClient:
 
     # -- Container operations (for docker export flow) ---------------- #
 
-    def container_create(self, image: str) -> str:
+    def container_create(
+        self,
+        image: str,
+        command: list[str] | None = None,
+        binds: list[str] | None = None,
+    ) -> str:
         """``POST /containers/create`` — create a stopped container.
+
+        Args:
+            image: Image name or ID.
+            command: Optional command (e.g. ``["sleep", "300"]``).
+            binds: Optional bind-mount list (e.g. ``["/host:/container:ro"]``).
 
         Returns the container ID.
         """
-        body = json.dumps({"Image": image}).encode()
+        config: dict[str, Any] = {"Image": image}
+        if command:
+            config["Cmd"] = command
+        if binds:
+            config["HostConfig"] = {"Binds": binds}
+        body = json.dumps(config).encode()
         result = self._json_request(
             "POST",
             "/containers/create",
@@ -490,6 +505,29 @@ class DockerClient:
             headers={"Content-Type": "application/json"},
         )
         return result["Id"]
+
+    def container_start(self, container_id: str) -> None:
+        """``POST /containers/{id}/start`` — start a created container."""
+        resp = self._request("POST", f"/containers/{container_id}/start")
+        data = resp.read()
+        if resp.status >= 400 and resp.status != 304:  # 304 = already started
+            raise DockerAPIError(resp.status, data.decode(errors="replace"))
+
+    def container_stop(
+        self, container_id: str, *, timeout: int = 5,
+    ) -> None:
+        """``POST /containers/{id}/stop`` — stop a running container."""
+        resp = self._request(
+            "POST", f"/containers/{container_id}/stop?t={timeout}",
+            timeout=float(timeout + 10),
+        )
+        data = resp.read()
+        if resp.status >= 400 and resp.status != 304:  # 304 = already stopped
+            raise DockerAPIError(resp.status, data.decode(errors="replace"))
+
+    def container_inspect(self, container_id: str) -> dict:
+        """``GET /containers/{id}/json`` — full container inspect."""
+        return self._json_request("GET", f"/containers/{container_id}/json")
 
     def container_export(self, container_id: str) -> http.client.HTTPResponse:
         """``GET /containers/{id}/export`` — stream container FS as tar.
