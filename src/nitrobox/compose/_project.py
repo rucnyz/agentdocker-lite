@@ -427,35 +427,95 @@ class ComposeProject:
                 mapping[name] = f"{project}-{name}"
 
         # Build missing images for services with build: section.
-        # Prebuilt images (svc.image without build:) are NOT pulled here —
-        # they are fetched directly from the registry during rootfs
-        # preparation, bypassing Docker entirely (Phase 3).
+        # Uses buildah (via nitrobox-core image-build) to build directly
+        # into containers/storage — no Docker daemon needed.
+        from nitrobox.image.layers import _try_containers_storage
         for name, svc in self._defs.items():
             if not svc.build or name not in mapping:
                 continue
 
             image_name = mapping[name]
-            if client.image_exists(image_name):
+            # Skip if already in containers/storage
+            if _try_containers_storage(image_name) is not None:
                 continue
 
             build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}
             context = str(build_cfg.get("context", "."))
             dockerfile = build_cfg.get("dockerfile", "Dockerfile")
-            build_args = build_cfg.get("args")
-            if isinstance(build_args, list):
-                build_args = dict(
-                    arg.split("=", 1) for arg in build_args if "=" in arg
-                )
 
-            logger.info("Building image for service %s: %s", name, image_name)
-            client.image_build(
-                context,
-                dockerfile=dockerfile,
-                tag=image_name,
-                build_args=build_args,
-            )
+            logger.info("Building image for service %s: %s (buildah)", name, image_name)
+            self._buildah_build(context, dockerfile, image_name)
 
         return mapping
+
+    @staticmethod
+    def _buildah_build(context: str, dockerfile: str, tag: str) -> None:
+        """Build an image using buildah via nitrobox-core (no Docker daemon)."""
+        import json as _json
+        import subprocess as _sp
+
+        bin_path = os.environ.get("NITROBOX_CORE_BIN", "")
+        if not bin_path:
+            from pathlib import Path
+            candidate = Path(__file__).resolve().parent.parent.parent.parent / "go" / "nitrobox-core"
+            bin_path = str(candidate) if candidate.is_file() else "nitrobox-core"
+
+        # buildah needs userns with full UID mapping (same as image-pull)
+        from nitrobox.config import detect_subuid_range
+        subuid = detect_subuid_range()
+        if not subuid:
+            raise RuntimeError("buildah build requires subuid mapping")
+
+        outer_uid, sub_start, sub_count = subuid
+        outer_gid = os.getgid()
+
+        from nitrobox.image.layers import _containers_storage_root
+        from pathlib import Path
+        graph_root = _containers_storage_root()
+        if graph_root is None:
+            graph_root = Path.home() / ".local/share/containers/storage"
+            graph_root.mkdir(parents=True, exist_ok=True)
+        run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
+        run_root.mkdir(parents=True, exist_ok=True)
+
+        req = _json.dumps({
+            "dockerfile": dockerfile,
+            "context": context,
+            "tag": tag,
+            "graph_root": str(graph_root),
+            "run_root": str(run_root),
+        }).encode()
+
+        # Fork + unshare + newuidmap + exec (same pattern as image-pull)
+        import ctypes
+        userns_r, userns_w = os.pipe()
+        go_r, go_w = os.pipe()
+        json_r, json_w = os.pipe()
+
+        pid = os.fork()
+        if pid == 0:
+            os.close(userns_r); os.close(go_w); os.close(json_w)
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            if libc.unshare(0x10000000) != 0:
+                os._exit(1)
+            os.write(userns_w, b"R"); os.close(userns_w)
+            os.read(go_r, 1); os.close(go_r)
+            os.dup2(json_r, 0); os.close(json_r)
+            os.execvp(bin_path, [bin_path, "image-build"])
+            os._exit(127)
+
+        os.close(userns_w); os.close(go_r); os.close(json_r)
+        os.read(userns_r, 1); os.close(userns_r)
+        _sp.run(["newuidmap", str(pid), "0", str(outer_uid), "1", "1", str(sub_start), str(sub_count)],
+                capture_output=True)
+        _sp.run(["newgidmap", str(pid), "0", str(outer_gid), "1", "1", str(sub_start), str(sub_count)],
+                capture_output=True)
+        os.write(go_w, b"G"); os.close(go_w)
+        os.write(json_w, req); os.close(json_w)
+
+        _, status = os.waitpid(pid, 0)
+        if os.waitstatus_to_exitcode(status) != 0:
+            raise RuntimeError(f"buildah build failed for {tag}")
 
     def _resolve_image(self, svc: _Service) -> str:
         """Resolve the Docker image name for a service."""
