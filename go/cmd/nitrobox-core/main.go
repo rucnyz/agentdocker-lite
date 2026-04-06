@@ -7,7 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"go.podman.io/storage/pkg/reexec"
+
 	"github.com/opensage-agent/nitrobox/go/internal/cgroup"
+	nbximage "github.com/opensage-agent/nitrobox/go/internal/image"
 	"github.com/opensage-agent/nitrobox/go/internal/imageref"
 	"github.com/opensage-agent/nitrobox/go/internal/mount"
 	"github.com/opensage-agent/nitrobox/go/internal/nsenter"
@@ -23,6 +26,9 @@ import (
 )
 
 func main() {
+	// containers/storage requires reexec.Init() for chroot-based layer operations.
+	reexec.Init()
+
 	rootCmd := &cobra.Command{
 		Use:           "nitrobox-core",
 		Short:         "nitrobox low-level syscall interface",
@@ -635,6 +641,149 @@ func main() {
 		Hidden: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			userns.FixupWorker()
+		},
+	})
+
+	// --- containers/storage image operations ---
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "image-layers",
+		Short: "Get overlay diff paths for an image from containers/storage",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				Image      string `json:"image"`
+				GraphRoot  string `json:"graph_root"`
+				RunRoot    string `json:"run_root"`
+				Driver     string `json:"driver"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			cfg := nbximage.DefaultStoreConfig()
+			if req.GraphRoot != "" {
+				cfg.GraphRoot = req.GraphRoot
+			}
+			if req.RunRoot != "" {
+				cfg.RunRoot = req.RunRoot
+			}
+			if req.Driver != "" {
+				cfg.Driver = req.Driver
+			}
+			store, err := nbximage.OpenStore(cfg)
+			if err != nil {
+				return err
+			}
+			defer store.Free()
+			paths, err := nbximage.ImageLayers(store, req.Image)
+			if err != nil {
+				return err
+			}
+			return writeJSON(paths)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "image-pull",
+		Short: "Pull an image into containers/storage",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				Image     string `json:"image"`
+				GraphRoot string `json:"graph_root"`
+				RunRoot   string `json:"run_root"`
+				Driver    string `json:"driver"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			cfg := nbximage.DefaultStoreConfig()
+			if req.GraphRoot != "" {
+				cfg.GraphRoot = req.GraphRoot
+			}
+			if req.RunRoot != "" {
+				cfg.RunRoot = req.RunRoot
+			}
+			if req.Driver != "" {
+				cfg.Driver = req.Driver
+			}
+			store, err := nbximage.OpenStore(cfg)
+			if err != nil {
+				return err
+			}
+			defer store.Free()
+			return nbximage.PullImage(store, req.Image, nil)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "image-build",
+		Short: "Build a Dockerfile using buildah",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				Dockerfile string `json:"dockerfile"`
+				Context    string `json:"context"`
+				Tag        string `json:"tag"`
+				GraphRoot  string `json:"graph_root"`
+				RunRoot    string `json:"run_root"`
+				Driver     string `json:"driver"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			cfg := nbximage.DefaultStoreConfig()
+			if req.GraphRoot != "" {
+				cfg.GraphRoot = req.GraphRoot
+			}
+			if req.RunRoot != "" {
+				cfg.RunRoot = req.RunRoot
+			}
+			if req.Driver != "" {
+				cfg.Driver = req.Driver
+			}
+			store, err := nbximage.OpenStore(cfg)
+			if err != nil {
+				return err
+			}
+			defer store.Free()
+			imageID, err := nbximage.BuildImage(store, req.Dockerfile, req.Context, req.Tag)
+			if err != nil {
+				return err
+			}
+			return writeJSON(imageID)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "image-list",
+		Short: "List images in containers/storage",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				GraphRoot string `json:"graph_root"`
+				RunRoot   string `json:"run_root"`
+				Driver    string `json:"driver"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			cfg := nbximage.DefaultStoreConfig()
+			if req.GraphRoot != "" {
+				cfg.GraphRoot = req.GraphRoot
+			}
+			if req.RunRoot != "" {
+				cfg.RunRoot = req.RunRoot
+			}
+			if req.Driver != "" {
+				cfg.Driver = req.Driver
+			}
+			store, err := nbximage.OpenStore(cfg)
+			if err != nil {
+				return err
+			}
+			defer store.Free()
+			result, err := nbximage.ListImages(store)
+			if err != nil {
+				return err
+			}
+			fmt.Println(result)
+			return nil
 		},
 	})
 
