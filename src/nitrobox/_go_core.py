@@ -303,17 +303,23 @@ def py_apply_landlock(
 
 
 def py_nsenter_preexec(target_pid: int) -> None:
-    raise NotImplementedError("py_nsenter_preexec: Phase 3 (namespace)")
+    _call("nsenter-preexec", {"target_pid": target_pid})
 
 
 def py_userns_preexec(
     target_pid: int, rootfs: str, working_dir: str
 ) -> None:
-    raise NotImplementedError("py_userns_preexec: Phase 3 (namespace)")
+    _call(
+        "userns-preexec",
+        {"target_pid": target_pid, "rootfs": rootfs, "working_dir": working_dir},
+    )
 
 
 def py_userns_fixup_for_delete(userns_pid: int, dir_path: str) -> int:
-    raise NotImplementedError("py_userns_fixup_for_delete: Phase 3 (namespace)")
+    return _call(
+        "userns-fixup-for-delete",
+        {"userns_pid": userns_pid, "dir_path": dir_path},
+    )
 
 
 def py_extract_tar_in_userns(
@@ -324,7 +330,17 @@ def py_extract_tar_in_userns(
     sub_start: int,
     sub_count: int,
 ) -> None:
-    raise NotImplementedError("py_extract_tar_in_userns: Phase 3 (namespace)")
+    _call(
+        "extract-tar-in-userns",
+        {
+            "tar_path": tar_path,
+            "dest": dest,
+            "outer_uid": outer_uid,
+            "outer_gid": outer_gid,
+            "sub_start": sub_start,
+            "sub_count": sub_count,
+        },
+    )
 
 
 def py_rmtree_in_userns(
@@ -334,7 +350,16 @@ def py_rmtree_in_userns(
     sub_start: int,
     sub_count: int,
 ) -> None:
-    raise NotImplementedError("py_rmtree_in_userns: Phase 3 (namespace)")
+    _call(
+        "rmtree-in-userns",
+        {
+            "path": path,
+            "outer_uid": outer_uid,
+            "outer_gid": outer_gid,
+            "sub_start": sub_start,
+            "sub_count": sub_count,
+        },
+    )
 
 
 class PySpawnResult:

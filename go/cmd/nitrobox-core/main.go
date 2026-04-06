@@ -7,14 +7,17 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nichochar/nitrobox/go/internal/cgroup"
-	"github.com/nichochar/nitrobox/go/internal/imageref"
-	"github.com/nichochar/nitrobox/go/internal/mount"
-	"github.com/nichochar/nitrobox/go/internal/pidfd"
-	"github.com/nichochar/nitrobox/go/internal/proc"
-	"github.com/nichochar/nitrobox/go/internal/qmp"
-	"github.com/nichochar/nitrobox/go/internal/security"
-	"github.com/nichochar/nitrobox/go/internal/whiteout"
+	"github.com/opensage-agent/nitrobox/go/internal/cgroup"
+	"github.com/opensage-agent/nitrobox/go/internal/imageref"
+	"github.com/opensage-agent/nitrobox/go/internal/mount"
+	"github.com/opensage-agent/nitrobox/go/internal/nsenter"
+	"github.com/opensage-agent/nitrobox/go/internal/pidfd"
+	"github.com/opensage-agent/nitrobox/go/internal/proc"
+	"github.com/opensage-agent/nitrobox/go/internal/qmp"
+	"github.com/opensage-agent/nitrobox/go/internal/security"
+	"github.com/opensage-agent/nitrobox/go/internal/unpack"
+	"github.com/opensage-agent/nitrobox/go/internal/userns"
+	"github.com/opensage-agent/nitrobox/go/internal/whiteout"
 	"github.com/spf13/cobra"
 )
 
@@ -449,6 +452,134 @@ func main() {
 				return err
 			}
 			return writeJSON(applied)
+		},
+	})
+
+	// --- userns ---
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "userns-fixup-for-delete",
+		Short: "Fix permissions for sandbox deletion",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				UsernsPid int    `json:"userns_pid"`
+				DirPath   string `json:"dir_path"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			count, err := userns.FixupDirForDelete(req.UsernsPid, req.DirPath)
+			if err != nil {
+				return err
+			}
+			return writeJSON(count)
+		},
+	})
+
+	// --- unpack ---
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "extract-tar-in-userns",
+		Short: "Extract tar in user namespace with UID mapping",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				TarPath  string `json:"tar_path"`
+				Dest     string `json:"dest"`
+				OuterUID uint32 `json:"outer_uid"`
+				OuterGID uint32 `json:"outer_gid"`
+				SubStart uint32 `json:"sub_start"`
+				SubCount uint32 `json:"sub_count"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			return unpack.ExtractTarInUserns(req.TarPath, req.Dest, req.OuterUID, req.OuterGID, req.SubStart, req.SubCount)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "rmtree-in-userns",
+		Short: "Remove directory tree in user namespace",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				Path     string `json:"path"`
+				OuterUID uint32 `json:"outer_uid"`
+				OuterGID uint32 `json:"outer_gid"`
+				SubStart uint32 `json:"sub_start"`
+				SubCount uint32 `json:"sub_count"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			return unpack.RmtreeInUserns(req.Path, req.OuterUID, req.OuterGID, req.SubStart, req.SubCount)
+		},
+	})
+
+	// --- nsenter ---
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "nsenter-preexec",
+		Short: "Enter mount namespace and chroot (rootful popen)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				TargetPid int `json:"target_pid"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			return nsenter.NsenterPreexec(req.TargetPid)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "userns-preexec",
+		Short: "Enter user+mount namespace and chroot (userns popen)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				TargetPid  int    `json:"target_pid"`
+				Rootfs     string `json:"rootfs"`
+				WorkingDir string `json:"working_dir"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			return nsenter.UsersPreexec(req.TargetPid, req.Rootfs, req.WorkingDir)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:                "nsenter-exec",
+		Short:              "Enter namespace and exec command",
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Usage: nsenter-exec --pid N [--rootful|--rootfs PATH --workdir PATH] -- cmd args...
+			var targetPid int
+			var rootful bool
+			var rootfs, workDir string
+			var cmdArgs []string
+
+			i := 0
+			for i < len(args) {
+				switch args[i] {
+				case "--pid":
+					i++
+					fmt.Sscanf(args[i], "%d", &targetPid)
+				case "--rootful":
+					rootful = true
+				case "--rootfs":
+					i++
+					rootfs = args[i]
+				case "--workdir":
+					i++
+					workDir = args[i]
+				case "--":
+					cmdArgs = args[i+1:]
+					i = len(args)
+					continue
+				}
+				i++
+			}
+			if len(cmdArgs) == 0 {
+				return fmt.Errorf("no command specified after --")
+			}
+			return nsenter.NsenterExec(targetPid, rootful, rootfs, workDir, cmdArgs)
 		},
 	})
 

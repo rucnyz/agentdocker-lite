@@ -1,4 +1,4 @@
-module github.com/nichochar/nitrobox/go
+module github.com/opensage-agent/nitrobox/go
 
 go 1.25.0
 
