@@ -21,12 +21,10 @@ TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
 
 def _requires_helper():
-    """Skip if checkpoint helper is not installed."""
-    from nitrobox.checkpoint import _find_helper
-    try:
-        _find_helper()
-    except FileNotFoundError:
-        pytest.skip("nitrobox-checkpoint-helper not found. Run 'nitrobox setup'.")
+    """Skip if CRIU is not available."""
+    from nitrobox.checkpoint import CheckpointManager
+    if not CheckpointManager.check_available():
+        pytest.skip("CRIU not found. Run 'nitrobox setup'.")
 
 
 def _requires_docker():
@@ -59,14 +57,12 @@ def sandbox(tmp_path, shared_cache_dir):
     rootfs = box._rootfs
     if rootfs.is_mount():
         import subprocess
-        from nitrobox.checkpoint import _find_helper
         try:
-            helper = _find_helper()
-            for _ in range(10):  # multiple restores stack mounts
+            for _ in range(10):
                 if not rootfs.is_mount():
                     break
                 subprocess.run(
-                    [helper, "umount", str(rootfs)],
+                    ["umount", "-l", str(rootfs)],
                     capture_output=True, timeout=5,
                 )
         except Exception:

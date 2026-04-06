@@ -10,6 +10,7 @@ import (
 	"go.podman.io/storage/pkg/reexec"
 
 	"github.com/opensage-agent/nitrobox/go/internal/cgroup"
+	nbxckpt "github.com/opensage-agent/nitrobox/go/internal/checkpoint"
 	nbximage "github.com/opensage-agent/nitrobox/go/internal/image"
 	"github.com/opensage-agent/nitrobox/go/internal/imageref"
 	"github.com/opensage-agent/nitrobox/go/internal/mount"
@@ -784,6 +785,39 @@ func main() {
 			}
 			fmt.Println(result)
 			return nil
+		},
+	})
+
+	// --- checkpoint (CRIU) ---
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "checkpoint-dump",
+		Short: "Checkpoint a sandbox process tree using CRIU",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var opts nbxckpt.DumpOpts
+			if err := readJSON(&opts); err != nil {
+				return err
+			}
+			result, err := nbxckpt.Dump(opts)
+			if err != nil {
+				return err
+			}
+			return writeJSON(result)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "checkpoint-restore",
+		Short: "Restore a sandbox from a CRIU checkpoint",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var opts nbxckpt.RestoreOpts
+			if err := readJSON(&opts); err != nil {
+				return err
+			}
+			result, err := nbxckpt.Restore(opts)
+			if err != nil {
+				return err
+			}
+			return writeJSON(result)
 		},
 	})
 
