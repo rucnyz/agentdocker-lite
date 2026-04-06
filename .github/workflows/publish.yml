@@ -16,6 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Build Go binary and place in _vendor/
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - run: |
+          cd go
+          CGO_ENABLED=1 go build \
+            -tags "exclude_graphdriver_btrfs containers_image_openpgp" \
+            -o ../src/nitrobox/_vendor/nitrobox-core \
+            ./cmd/nitrobox-core/
+          chmod +x ../src/nitrobox/_vendor/nitrobox-core
+
+      # Build wheel with maturin (includes Rust _core + Go binary in _vendor/)
       - uses: PyO3/maturin-action@v1
         with:
           target: x86_64

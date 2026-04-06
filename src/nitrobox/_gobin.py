@@ -6,8 +6,8 @@ import os
 import threading
 from pathlib import Path
 
-# Project root: src/nitrobox/_gobin.py → parent.parent.parent = project root
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PKG_DIR = Path(__file__).resolve().parent  # src/nitrobox/
+_PROJECT_ROOT = _PKG_DIR.parent.parent      # project root (dev layout)
 
 _BIN: str | None = None
 _BIN_LOCK = threading.Lock()
@@ -18,8 +18,9 @@ def gobin() -> str:
 
     Search order:
     1. ``NITROBOX_CORE_BIN`` environment variable
-    2. ``<project_root>/go/nitrobox-core`` (dev layout)
-    3. ``nitrobox-core`` on PATH
+    2. ``<package>/_vendor/nitrobox-core`` (installed wheel)
+    3. ``<project_root>/go/nitrobox-core`` (dev layout)
+    4. ``nitrobox-core`` on PATH
     """
     global _BIN
     if _BIN is None:
@@ -33,6 +34,7 @@ def gobin() -> str:
 def _find() -> str:
     for p in [
         os.environ.get("NITROBOX_CORE_BIN", ""),
+        str(_PKG_DIR / "_vendor" / "nitrobox-core"),
         str(_PROJECT_ROOT / "go" / "nitrobox-core"),
     ]:
         if p and os.path.isfile(p) and os.access(p, os.X_OK):
