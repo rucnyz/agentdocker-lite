@@ -1275,6 +1275,163 @@ class TestCleanupVerification:
 
 
 # ------------------------------------------------------------------ #
+#  Crash + cleanup_stale                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestCleanupAfterCrash:
+    """Verify cleanup_stale recovers all resources after a simulated crash.
+
+    Creates a real sandbox, kills the shell with SIGKILL to simulate a
+    crash, then verifies that cleanup_stale removes overlay mounts,
+    cgroup directories, and sandbox env directories (including
+    mapped-UID files from userns sandboxes).
+    """
+
+    def test_cleanup_stale_after_sigkill(self, tmp_path, shared_cache_dir):
+        """SIGKILL the shell, then cleanup_stale should remove everything."""
+        _requires_docker()
+
+        env_dir = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="crash-test")
+        sandbox_dir = tmp_path / "envs" / "crash-test"
+
+        # Write some files (creates mapped-UID files in overlay upper)
+        box.run("touch /workspace/file1 /workspace/file2")
+
+        # Record state before crash
+        pid = box._persistent_shell.pid
+        cgroup_path = box._cgroup_path
+
+        # Simulate crash: kill shell with SIGKILL (no cleanup runs)
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+
+        # Sandbox dir should still exist (orphaned)
+        assert sandbox_dir.exists(), "sandbox dir should still exist after crash"
+
+        # Now run cleanup_stale
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned >= 1, f"cleanup_stale should have cleaned at least 1, got {cleaned}"
+
+        # Verify: no sandbox dir (or only stale userns mounts that need root)
+        if sandbox_dir.exists():
+            rootfs = sandbox_dir / "rootfs"
+            if rootfs.exists() and rootfs.is_mount():
+                pytest.skip(
+                    "stale userns mount — needs root or reboot to unmount "
+                    "(known Linux limitation for rootless)"
+                )
+            else:
+                pytest.fail(
+                    f"sandbox dir not cleaned: "
+                    f"{list(sandbox_dir.iterdir()) if sandbox_dir.exists() else 'N/A'}"
+                )
+
+        # Verify: no mounts under env_dir
+        mount_output = subprocess.run(["mount"], capture_output=True, text=True).stdout
+        assert "crash-test" not in mount_output, \
+            f"stale mount found: {[l for l in mount_output.splitlines() if 'crash-test' in l]}"
+
+        # Verify: no cgroup
+        if cgroup_path:
+            assert not cgroup_path.exists(), f"cgroup not cleaned: {cgroup_path}"
+
+    def test_cleanup_stale_mapped_uid_files(self, tmp_path, shared_cache_dir):
+        """Crash with mapped-UID files in overlay upper — cleanup must use rmtree_mapped."""
+        _requires_docker()
+
+        env_dir = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="crash-mapped-uid")
+        sandbox_dir = tmp_path / "envs" / "crash-mapped-uid"
+
+        # Create files owned by different UIDs inside the sandbox
+        box.run("adduser --disabled-password --gecos '' testuser 2>/dev/null || true")
+        box.run("su testuser -c 'touch /workspace/owned_by_testuser'")
+
+        pid = box._persistent_shell.pid
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned >= 1
+
+        if sandbox_dir.exists():
+            rootfs = sandbox_dir / "rootfs"
+            if rootfs.exists() and rootfs.is_mount():
+                pytest.skip("stale userns mount — needs root")
+            else:
+                pytest.fail("sandbox with mapped-UID files not cleaned")
+
+    def test_cleanup_stale_multiple_crashed(self, tmp_path, shared_cache_dir):
+        """Multiple crashed sandboxes cleaned in one call."""
+        _requires_docker()
+
+        env_dir = str(tmp_path / "envs")
+        boxes = []
+        for i in range(3):
+            config = SandboxConfig(
+                image=TEST_IMAGE,
+                working_dir="/workspace",
+                env_base_dir=env_dir,
+                rootfs_cache_dir=shared_cache_dir,
+            )
+            box = Sandbox(config, name=f"multi-crash-{i}")
+            box.run(f"echo sandbox-{i}")
+            boxes.append(box)
+
+        # Kill all shells
+        for box in boxes:
+            pid = box._persistent_shell.pid
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned == 3, f"expected 3 cleaned, got {cleaned}"
+
+    def test_cleanup_stale_orphan_no_pid(self, tmp_path, shared_cache_dir):
+        """Sandbox dir with no .pid file (partial init crash) is cleaned."""
+        _requires_docker()
+
+        env_dir = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="orphan-test")
+        sandbox_dir = tmp_path / "envs" / "orphan-test"
+
+        # Write files, then simulate partial cleanup: remove .pid but leave dirs
+        box.run("touch /workspace/data")
+        pid = box._persistent_shell.pid
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        pid_file = sandbox_dir / ".pid"
+        if pid_file.exists():
+            pid_file.unlink()
+
+        # upper/ and work/ exist but no .pid — this is the orphan case
+        assert (sandbox_dir / "upper").exists() or (sandbox_dir / "work").exists()
+
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned >= 1, "orphan dir should be cleaned"
+
+
+# ------------------------------------------------------------------ #
 #  Layer cache                                                          #
 # ------------------------------------------------------------------ #
 
