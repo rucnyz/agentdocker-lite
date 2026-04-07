@@ -801,12 +801,23 @@ class Sandbox:
             if not pid_file.exists():
                 if (entry / "work").exists() or (entry / "upper").exists():
                     logger.info("Cleaning up orphaned sandbox dir %s (no .pid)", entry.name)
-                    for child in entry.rglob("*"):
+                    rootfs_dir = entry / "rootfs"
+                    if rootfs_dir.exists():
+                        from nitrobox._backend import py_umount_recursive_lazy
                         try:
-                            child.chmod(0o700)
+                            py_umount_recursive_lazy(str(rootfs_dir))
                         except OSError:
-                            pass
-                    shutil.rmtree(entry, ignore_errors=True)
+                            # Mount was created in a different userns that no longer
+                            # exists — only real root or a reboot can unmount it.
+                            # Skip the dir; rmtree would fail on the mountpoint.
+                            if rootfs_dir.is_mount():
+                                logger.warning(
+                                    "Cannot unmount orphaned %s (stale userns mount, "
+                                    "needs sudo umount -l or reboot)", rootfs_dir,
+                                )
+                                continue
+                    from nitrobox.image.layers import rmtree_mapped
+                    rmtree_mapped(entry)
                     cleaned += 1
                 continue
 
@@ -879,12 +890,8 @@ class Sandbox:
                 except OSError as e:
                     logger.debug("cgroup cleanup for %s (non-fatal): %s", entry.name, e)
 
-            for child in entry.rglob("*"):
-                try:
-                    child.chmod(0o700)
-                except OSError:
-                    pass
-            shutil.rmtree(entry, ignore_errors=True)
+            from nitrobox.image.layers import rmtree_mapped
+            rmtree_mapped(entry)
             cleaned += 1
 
         if cleaned:
