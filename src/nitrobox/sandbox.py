@@ -1516,18 +1516,20 @@ class Sandbox:
             py_cleanup_cgroup(str(self._cgroup_path))
         except OSError:
             pass
-        # Rust retries for 200ms which may not be enough if processes are
-        # still exiting.  Retry in Python for up to 2s total.
-        for _ in range(20):
-            if not self._cgroup_path.exists():
-                return
-            try:
-                self._cgroup_path.rmdir()
-                return
-            except OSError:
-                time.sleep(0.1)
+        # Rust retries for 200ms. If cgroup still exists, schedule a
+        # background retry — don't block teardown.
         if self._cgroup_path.exists():
-            logger.warning("cgroup not cleaned: %s", self._cgroup_path)
+            cg = self._cgroup_path
+            def _deferred_rmdir():
+                for _ in range(20):
+                    if not cg.exists():
+                        return
+                    try:
+                        cg.rmdir()
+                        return
+                    except OSError:
+                        time.sleep(0.1)
+            threading.Thread(target=_deferred_rmdir, daemon=True).start()
 
     # -- rootless cgroup via delegation -------------------------------- #
 
