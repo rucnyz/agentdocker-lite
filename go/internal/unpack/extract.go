@@ -146,13 +146,16 @@ func RmtreeInUserns(path string, outerUID, outerGID, subStart, subCount uint32) 
 	usernsPipeR.Read(buf)
 	usernsPipeR.Close()
 
-	_ = setupIDMapping(cmd.Process.Pid, outerUID, outerGID, subStart, subCount)
+	if err := setupIDMapping(cmd.Process.Pid, outerUID, outerGID, subStart, subCount); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return err
+	}
 
 	goPipeW.Write([]byte("G"))
 	goPipeW.Close()
 
-	cmd.Wait()
-	return nil
+	return cmd.Wait()
 }
 
 // coreBinary returns the path to the nitrobox-core binary for re-exec.

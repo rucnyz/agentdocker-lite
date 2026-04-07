@@ -54,6 +54,35 @@ class SandboxFeatures(TypedDict, total=False):
 
 
 # ====================================================================== #
+#  Cleanup helpers                                                         #
+# ====================================================================== #
+
+
+def _force_rmtree(entry: Path) -> None:
+    """Remove a sandbox directory, handling overlay workdir perms and mapped UIDs.
+
+    1. chmod everything we can (fixes overlay's 000 workdir)
+    2. Try shutil.rmtree
+    3. If that fails, use rmtree_mapped (fork + userns + rm -rf)
+    """
+    # Fix overlay workdir 000 permissions
+    for child in entry.rglob("*"):
+        try:
+            child.chmod(0o700)
+        except OSError:
+            pass
+
+    try:
+        shutil.rmtree(entry)
+        return
+    except (PermissionError, OSError):
+        pass
+
+    from nitrobox.image.layers import rmtree_mapped
+    rmtree_mapped(entry)
+
+
+# ====================================================================== #
 #  Image defaults                                                          #
 # ====================================================================== #
 
@@ -777,6 +806,11 @@ class Sandbox:
         cls._live_instances.clear()
 
     @staticmethod
+    @staticmethod
+    def _force_rmtree(entry: Path) -> None:
+        """Remove a sandbox dir, handling overlay workdir perms and mapped UIDs."""
+        _force_rmtree(entry)
+
     def cleanup_stale(env_base_dir: str = "") -> int:
         """Clean up orphaned sandboxes left by crashed processes.
 
@@ -816,15 +850,7 @@ class Sandbox:
                                     "needs sudo umount -l or reboot)", rootfs_dir,
                                 )
                                 continue
-                    # Fix overlay workdir permissions (kernel sets 000)
-                    # and any other permission issues before rmtree.
-                    for child in entry.rglob("*"):
-                        try:
-                            child.chmod(0o700)
-                        except OSError:
-                            pass
-                    from nitrobox.image.layers import rmtree_mapped
-                    rmtree_mapped(entry)
+                    _force_rmtree(entry)
                     cleaned += 1
                 continue
 
@@ -897,13 +923,7 @@ class Sandbox:
                 except OSError as e:
                     logger.debug("cgroup cleanup for %s (non-fatal): %s", entry.name, e)
 
-            for child in entry.rglob("*"):
-                try:
-                    child.chmod(0o700)
-                except OSError:
-                    pass
-            from nitrobox.image.layers import rmtree_mapped
-            rmtree_mapped(entry)
+            _force_rmtree(entry)
             cleaned += 1
 
         if cleaned:
@@ -1007,6 +1027,19 @@ class Sandbox:
 
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(self._persistent_shell.pid))
+
+        # Save UID mapping so cleanup_stale can enter a userns with the
+        # same mapping to delete mapped-UID files after a crash.
+        if self._userns and self._subuid_range:
+            import json
+            uid_map_file = self._env_dir / ".uidmap"
+            outer_uid, sub_start, sub_count = self._subuid_range
+            uid_map_file.write_text(json.dumps({
+                "outer_uid": outer_uid,
+                "outer_gid": os.getgid(),
+                "sub_start": sub_start,
+                "sub_count": sub_count,
+            }))
 
         self.features: SandboxFeatures = {
             "pidfd": self._persistent_shell._pidfd is not None,

@@ -282,7 +282,7 @@ def rmtree_mapped(path: str | Path) -> None:
     try:
         shutil.rmtree(path)
         return
-    except PermissionError:
+    except OSError:
         pass
 
     _rmtree_in_userns(path)
@@ -305,23 +305,51 @@ def _rmtree_in_userns(path: Path) -> None:
 
     outer_uid, sub_start, sub_count = subuid
 
-    # Use rmtree-in-userns subcommand which does unshare(CLONE_NEWUSER)
-    # + newuidmap to get the right UID mapping, then os.RemoveAll.
-    import json
-    req = json.dumps({
-        "path": str(path),
-        "outer_uid": outer_uid,
-        "outer_gid": os.getgid(),
-        "sub_start": sub_start,
-        "sub_count": sub_count,
-    })
-    r = subprocess.run(
-        [bin_path, "rmtree-in-userns"],
-        input=req.encode(),
-        capture_output=True, timeout=30,
+    # Enter a userns with the sandbox's UID mapping and rm -rf.
+    # Uses the same fork+unshare+newuidmap pattern as _containers_storage_pull
+    # but safe for asyncio (subprocess, not os.fork).
+    import ctypes
+    outer_gid = os.getgid()
+
+    userns_r, userns_w = os.pipe()
+    go_r, go_w = os.pipe()
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(userns_r)
+        os.close(go_w)
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.unshare(0x10000000) != 0:  # CLONE_NEWUSER
+            os._exit(1)
+        os.write(userns_w, b"R")
+        os.close(userns_w)
+        os.read(go_r, 1)
+        os.close(go_r)
+        # Now we're root in userns with correct UID mapping
+        os.execvp("rm", ["rm", "-rf", str(path)])
+        os._exit(127)
+
+    os.close(userns_w)
+    os.close(go_r)
+    os.read(userns_r, 1)
+    os.close(userns_r)
+
+    subprocess.run(
+        ["newuidmap", str(pid), "0", str(outer_uid), "1",
+         "1", str(sub_start), str(sub_count)],
+        capture_output=True,
     )
-    if r.returncode != 0:
-        # Fallback: try shutil with ignore_errors
+    subprocess.run(
+        ["newgidmap", str(pid), "0", str(outer_gid), "1",
+         "1", str(sub_start), str(sub_count)],
+        capture_output=True,
+    )
+
+    os.write(go_w, b"G")
+    os.close(go_w)
+    _, status = os.waitpid(pid, 0)
+
+    if path.exists():
         shutil.rmtree(path, ignore_errors=True)
 
 

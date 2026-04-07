@@ -364,9 +364,25 @@ func main() {
 		Use:    "_rmtree-worker",
 		Hidden: true,
 		Run: func(cmd *cobra.Command, args []string) {
+			// fd 3 = usernsPipeW, fd 4 = goPipeR (from RmtreeInUserns)
+			// Signal parent that we're in the new userns, then wait for UID mapping.
+			usernsPipeW := os.NewFile(3, "usernsPipeW")
+			goPipeR := os.NewFile(4, "goPipeR")
+			if usernsPipeW != nil {
+				usernsPipeW.Write([]byte("R"))
+				usernsPipeW.Close()
+			}
+			if goPipeR != nil {
+				buf := make([]byte, 1)
+				goPipeR.Read(buf)
+				goPipeR.Close()
+			}
+
 			path := os.Getenv("_NBX_RM_PATH")
 			if path != "" {
-				os.RemoveAll(path)
+				if err := os.RemoveAll(path); err != nil {
+					fmt.Fprintf(os.Stderr, "rmtree-worker: RemoveAll %s: %v\n", path, err)
+				}
 			}
 		},
 	})
