@@ -1022,8 +1022,13 @@ class TestComposeProject:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+            return
+        if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+            return
+        pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
     def test_lifecycle(self, tmp_path, shared_cache_dir):
         """up → run → reset → run → down with a single-service compose."""
@@ -1640,8 +1645,13 @@ class TestNetworkModeNoneIntegration:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+            return
+        if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+            return
+        pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
     def test_network_mode_none_no_internet(self, tmp_path, shared_cache_dir):
         """Sandbox with network_mode: none cannot reach external hosts."""
@@ -1691,8 +1701,13 @@ class TestDownOptions:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+            return
+        if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+            return
+        pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
     def test_down_rmi_all_removes_image_from_store(self, tmp_path):
         """down(rmi='all') removes images from containers/storage."""
@@ -1794,8 +1809,13 @@ class TestDetachMode:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+            return
+        if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+            return
+        pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
     def test_detach_returns_immediately(self, tmp_path, shared_cache_dir):
         """up(detach=True) should return before health check passes."""
@@ -1914,8 +1934,13 @@ class TestExtraHostsAndSysctls:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+            return
+        if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+            return
+        pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
     def test_extra_hosts_in_etc_hosts(self, tmp_path, shared_cache_dir):
         """extra_hosts entries should appear in /etc/hosts."""
