@@ -126,34 +126,24 @@ func ImageLayers(store storage.Store, imageRef string) ([]string, error) {
 	return paths, nil
 }
 
-// PullImage pulls an image from a registry into the containers/storage store.
+// PullImage pulls an image into containers/storage.
+//
+// Search order (mirrors Docker Compose behavior):
+//  1. docker-daemon: — copy from local Docker daemon (fast, no network)
+//  2. docker:// — pull from registry (fallback)
 func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.SystemContext) error {
 	ctx := context.Background()
 
-	// Parse source reference.
-	// Supports: "docker://image:tag", "docker-daemon:image:tag", "image:tag" (default docker://)
-	srcName := imageRef
-	if !strings.Contains(srcName, "://") && !strings.HasPrefix(srcName, "docker-daemon:") {
-		srcName = "docker://" + srcName
-	}
-	srcRef, err := alltransports.ParseImageName(srcName)
-	if err != nil {
-		return fmt.Errorf("parse source %q: %w", imageRef, err)
-	}
-
-	// Destination: use ParseStoreReference with our store (avoids default store init)
+	// Destination in containers/storage
 	storageName := imageRef
-	// Strip transport prefix for storage name
 	for _, prefix := range []string{"docker://", "docker-daemon:"} {
 		storageName = strings.TrimPrefix(storageName, prefix)
 	}
-	stTransport := imgstorage.Transport
-	destRef, err := stTransport.ParseStoreReference(store, storageName)
+	destRef, err := imgstorage.Transport.ParseStoreReference(store, storageName)
 	if err != nil {
 		return fmt.Errorf("parse dest: %w", err)
 	}
 
-	// Policy context (accept all)
 	policy, err := signature.NewPolicyContext(&signature.Policy{
 		Default: []signature.PolicyRequirement{
 			signature.NewPRInsecureAcceptAnything(),
@@ -164,13 +154,38 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 	}
 	defer policy.Destroy()
 
-	_, err = cp.Image(ctx, policy, destRef, srcRef, &cp.Options{
-		SourceCtx: systemCtx,
-	})
+	// If user specified an explicit transport, use it directly.
+	if strings.Contains(imageRef, "://") || strings.HasPrefix(imageRef, "docker-daemon:") {
+		srcRef, err := alltransports.ParseImageName(imageRef)
+		if err != nil {
+			return fmt.Errorf("parse source %q: %w", imageRef, err)
+		}
+		_, err = cp.Image(ctx, policy, destRef, srcRef, &cp.Options{SourceCtx: systemCtx})
+		if err != nil {
+			return fmt.Errorf("pull %q: %w", imageRef, err)
+		}
+		return nil
+	}
+
+	// Try docker-daemon: first (local Docker, no network needed).
+	daemonRef, daemonErr := alltransports.ParseImageName("docker-daemon:" + imageRef)
+	if daemonErr == nil {
+		_, err = cp.Image(ctx, policy, destRef, daemonRef, &cp.Options{SourceCtx: systemCtx})
+		if err == nil {
+			return nil
+		}
+		// Docker daemon not available or image not found — fall through to registry.
+	}
+
+	// Fallback: pull from registry.
+	srcRef, err := alltransports.ParseImageName("docker://" + imageRef)
+	if err != nil {
+		return fmt.Errorf("parse source %q: %w", imageRef, err)
+	}
+	_, err = cp.Image(ctx, policy, destRef, srcRef, &cp.Options{SourceCtx: systemCtx})
 	if err != nil {
 		return fmt.Errorf("pull %q: %w", imageRef, err)
 	}
-
 	return nil
 }
 
