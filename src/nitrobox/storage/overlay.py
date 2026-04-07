@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def setup_overlay(lowerdir_spec: str, upper_dir: str, work_dir: str, rootfs: str) -> None:
     """Mount overlayfs with the given layer stack."""
-    from nitrobox._backend import py_mount_overlay
+    from nitrobox._core import py_mount_overlay
 
     for d in (upper_dir, work_dir, rootfs):
         Path(d).mkdir(parents=True, exist_ok=True)
@@ -25,7 +25,7 @@ def setup_overlay(lowerdir_spec: str, upper_dir: str, work_dir: str, rootfs: str
         rootfs,
     )
 
-    from nitrobox._backend import py_make_private
+    from nitrobox._core import py_make_private
     try:
         py_make_private(rootfs)
     except OSError:
@@ -54,7 +54,7 @@ def reset_overlayfs(
         cleanup_dead_dirs: Optional list of dead directories to clean up.
     """
     if overlay_mounted:
-        from nitrobox._backend import py_umount_lazy
+        from nitrobox._core import py_umount_lazy
         try:
             py_umount_lazy(rootfs)
         except OSError:
@@ -90,7 +90,7 @@ def bind_mount(
 
     Returns the target mount point path on success, or ``None`` on failure.
     """
-    from nitrobox._backend import py_bind_mount, py_remount_ro_bind
+    from nitrobox._core import py_bind_mount, py_remount_ro_bind
 
     target = Path(rootfs) / container_path.lstrip("/")
     target.mkdir(parents=True, exist_ok=True)
@@ -123,7 +123,7 @@ def overlay_mount(
         ``(None, None)`` on failure.  The caller should track *tmpdir*
         for cleanup.
     """
-    from nitrobox._backend import py_mount_overlay
+    from nitrobox._core import py_mount_overlay
 
     target = Path(rootfs) / container_path.lstrip("/")
     target.mkdir(parents=True, exist_ok=True)
@@ -149,7 +149,7 @@ def unmount_binds(
     cow_tmpdirs: list[str] | None = None,
 ) -> None:
     """Unmount all bind mounts and clean up COW temp directories."""
-    from nitrobox._backend import py_umount_lazy
+    from nitrobox._core import py_umount_lazy
 
     for mount_point in reversed(bind_mounts):
         try:
@@ -173,7 +173,7 @@ def unmount_all(
     overlay_mounted: bool = False,
 ) -> None:
     """Unmount bind mounts, then the root overlay if applicable."""
-    from nitrobox._backend import py_umount_recursive_lazy
+    from nitrobox._core import py_umount_recursive_lazy
 
     unmount_binds(bind_mounts, cow_tmpdirs)
 

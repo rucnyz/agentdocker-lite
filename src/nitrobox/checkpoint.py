@@ -211,7 +211,7 @@ class CheckpointManager:
         upper = getattr(self._sandbox, "_upper_dir", None)
         if upper:
             rootfs = self._sandbox._rootfs
-            from nitrobox._backend import py_umount
+            from nitrobox._core import py_umount
             try:
                 py_umount(str(rootfs))
             except OSError:
@@ -240,7 +240,7 @@ class CheckpointManager:
         if lowerdir_spec and upper:
             rootfs = self._sandbox._rootfs
             work = getattr(self._sandbox, "_work_dir", None)
-            from nitrobox._backend import py_mount_overlay
+            from nitrobox._core import py_mount_overlay
             try:
                 py_mount_overlay(str(lowerdir_spec), str(upper), str(work), str(rootfs))
             except OSError:
