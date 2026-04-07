@@ -1694,18 +1694,16 @@ class TestDownOptions:
         if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
             pytest.skip("requires Docker")
 
-    def test_down_rmi_all_removes_layer_cache(self, tmp_path):
-        """down(rmi='all') removes cached rootfs layers for project images."""
-        pytest.skip("compose layer cache cleanup needs containers/storage integration")
+    def test_down_rmi_all_removes_image_from_store(self, tmp_path):
+        """down(rmi='all') removes images from containers/storage."""
         self._skip_if_no_sandbox()
-        from pathlib import Path
+        from nitrobox.image.layers import _get_store_layers
 
-        cache_dir = str(tmp_path / "cache")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""\
             services:
               app:
-                image: ubuntu:22.04
+                image: alpine:latest
                 command: "sleep infinity"
         """))
 
@@ -1713,32 +1711,29 @@ class TestDownOptions:
             compose,
             project_name="test-rmi",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=cache_dir,
         )
         proj.up()
         proj.services["app"].run("echo ok")
 
-        cache_layers = Path(cache_dir) / "layers"
-        assert cache_layers.exists()
-        cached_before = set(cache_layers.iterdir())
-        assert len(cached_before) > 0
+        # Image should be in store after up()
+        assert _get_store_layers("alpine:latest") is not None
 
         proj.down(rmi="all")
 
-        cached_after = set(cache_layers.iterdir()) if cache_layers.exists() else set()
-        assert len(cached_after) < len(cached_before)
+        # Image should be removed from store after down(rmi="all")
+        assert _get_store_layers("alpine:latest") is None, \
+            "image still in containers/storage after down(rmi='all')"
 
-    def test_down_no_rmi_keeps_layer_cache(self, tmp_path):
-        """down() without rmi keeps cached rootfs layers."""
+    def test_down_no_rmi_keeps_image_in_store(self, tmp_path):
+        """down() without rmi keeps images in containers/storage."""
         self._skip_if_no_sandbox()
-        from pathlib import Path
+        from nitrobox.image.layers import _get_store_layers
 
-        cache_dir = str(tmp_path / "cache")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""\
             services:
               app:
-                image: ubuntu:22.04
+                image: alpine:latest
                 command: "sleep infinity"
         """))
 
@@ -1746,18 +1741,16 @@ class TestDownOptions:
             compose,
             project_name="test-no-rmi",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=cache_dir,
         )
         proj.up()
         proj.services["app"].run("echo ok")
 
-        cache_layers = Path(cache_dir) / "layers"
-        cached_before = set(cache_layers.iterdir()) if cache_layers.exists() else set()
+        assert _get_store_layers("alpine:latest") is not None
 
         proj.down()  # no rmi
 
-        cached_after = set(cache_layers.iterdir()) if cache_layers.exists() else set()
-        assert cached_after == cached_before
+        # Image should still be in store
+        assert _get_store_layers("alpine:latest") is not None
 
     def test_down_volumes_false_keeps_volume_dirs(self, tmp_path):
         """down(volumes=False) keeps named volume directories."""
