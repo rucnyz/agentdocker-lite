@@ -13,7 +13,7 @@ Setup:
     git clone https://github.com/xlang-ai/osworld.git
     cd osworld && pip install -r requirements.txt
 
-    # 2. Install the adl provider into OSWorld
+    # 2. Install the nitrobox provider into OSWorld
     #    (copies provider.py and manager.py into desktop_env/providers/adl/)
     python examples/bench_osworld_e2e.py --install-provider --osworld-dir /path/to/osworld
 
@@ -161,7 +161,7 @@ def _install_provider(osworld_dir: str) -> None:
             )
             runner.write_text(runner_text)
 
-    print(f"  adl provider installed at {provider_dst}")
+    print(f"  nitrobox provider installed at {provider_dst}")
 
 
 def _write_provider_files(dst: Path) -> None:
@@ -415,7 +415,7 @@ def _mean(vals: list[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def _format_results_table(docker: dict, adl: dict) -> str:
+def _format_results_table(docker: dict, nitrobox: dict) -> str:
     """Format results as markdown table (matching harbor e2e format)."""
     lines = []
 
@@ -427,7 +427,7 @@ def _format_results_table(docker: dict, adl: dict) -> str:
     lines.append(
         f"|{'-'*10}|{'-'*7}|{'-'*6}|{'-'*6}|{'-'*7}|{'-'*8}|{'-'*12}|"
     )
-    for name, r in [("Docker", docker), ("nitrobox", adl)]:
+    for name, r in [("Docker", docker), ("nitrobox", nitrobox)]:
         rate = r['pass'] / r['tasks'] * 100 if r['tasks'] else 0
         n_steps = _mean(r.get("phases", {}).get("n_steps", []))
         steps_str = f"{n_steps:.1f}" if n_steps > 0 else "—"
@@ -439,7 +439,7 @@ def _format_results_table(docker: dict, adl: dict) -> str:
     # Phase timing breakdown (if timing.json available)
     has_phases = any(
         r.get("phases", {}).get("environment_setup", [])
-        for r in [docker, adl]
+        for r in [docker, nitrobox]
     )
     if has_phases:
         lines.append("")
@@ -451,7 +451,7 @@ def _format_results_table(docker: dict, adl: dict) -> str:
         lines.append(
             f"|{'-'*10}|{'-'*11}|{'-'*9}|{'-'*9}|{'-'*10}|"
         )
-        for name, r in [("Docker", docker), ("nitrobox", adl)]:
+        for name, r in [("Docker", docker), ("nitrobox", nitrobox)]:
             p = r.get("phases", {})
             setup = _mean(p.get("environment_setup", []))
             agent = _mean(p.get("agent_execution", []))
@@ -466,15 +466,15 @@ def _format_results_table(docker: dict, adl: dict) -> str:
 
     # Per-domain
     lines.append("")
-    all_domains = sorted(set(list(docker["per_domain"].keys()) + list(adl["per_domain"].keys())))
+    all_domains = sorted(set(list(docker["per_domain"].keys()) + list(nitrobox["per_domain"].keys())))
     lines.append(f"| {'Domain':>20} | {'Docker':>8} | {'nitrobox':>8} |")
     lines.append(f"|{'-'*22}|{'-'*10}|{'-'*10}|")
     for domain in all_domains:
         dd = docker["per_domain"].get(domain, {"tasks": 0, "pass": 0})
-        ad = adl["per_domain"].get(domain, {"tasks": 0, "pass": 0})
+        nd = nitrobox["per_domain"].get(domain, {"tasks": 0, "pass": 0})
         d_str = f"{dd['pass']}/{dd['tasks']}" if dd['tasks'] else "—"
-        a_str = f"{ad['pass']}/{ad['tasks']}" if ad['tasks'] else "—"
-        lines.append(f"| {domain:>20} | {d_str:>8} | {a_str:>8} |")
+        n_str = f"{nd['pass']}/{nd['tasks']}" if nd['tasks'] else "—"
+        lines.append(f"| {domain:>20} | {d_str:>8} | {n_str:>8} |")
 
     return "\n".join(lines)
 
@@ -487,12 +487,12 @@ def main():
     parser.add_argument("--n-tasks", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=15)
     parser.add_argument("--model", default="claude-sonnet-4-20250514")
-    parser.add_argument("--num-envs", type=int, default=1)
-    parser.add_argument("--providers", default="docker,adl")
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--envs", default="docker,nitrobox")
     parser.add_argument("--output", default=None)
     parser.add_argument("--install-provider", action="store_true",
-                        help="Install adl provider into OSWorld and exit")
-    parser.add_argument("--parse-only", nargs=2, metavar=("DOCKER_DIR", "ADL_DIR"),
+                        help="Install nitrobox provider into OSWorld and exit")
+    parser.add_argument("--parse-only", nargs=2, metavar=("DOCKER_DIR", "NITROBOX_DIR"),
                         help="Parse existing result dirs (skip running)")
     args = parser.parse_args()
 
@@ -505,63 +505,66 @@ def main():
         _install_provider(osworld_dir)
         return
 
-    providers = [p.strip() for p in args.providers.split(",")]
+    envs = [e.strip() for e in args.envs.split(",")]
 
     print(f"OSWorld E2E benchmark")
     print(f"  OSWorld:     {osworld_dir}")
     print(f"  Tasks:       {args.n_tasks}")
     print(f"  Max steps:   {args.max_steps}")
     print(f"  Model:       {args.model}")
-    print(f"  Providers:   {providers}")
+    print(f"  Envs:        {envs}")
+
+    # Map env names to OSWorld provider names
+    _env_to_provider = {"docker": "docker", "nitrobox": "adl"}
 
     if args.parse_only:
         docker = _parse_results(Path(osworld_dir) / args.parse_only[0], 0)
-        adl = _parse_results(Path(osworld_dir) / args.parse_only[1], 0)
+        nitrobox = _parse_results(Path(osworld_dir) / args.parse_only[1], 0)
     else:
-        # Ensure adl provider is installed
-        adl_dir = Path(osworld_dir) / "desktop_env" / "providers" / "adl"
-        if "adl" in providers and not adl_dir.exists():
-            print("\nInstalling adl provider...")
+        # Ensure nitrobox provider is installed
+        provider_dir = Path(osworld_dir) / "desktop_env" / "providers" / "adl"
+        if "nitrobox" in envs and not provider_dir.exists():
+            print("\nInstalling nitrobox provider...")
             _install_provider(osworld_dir)
 
         task_file = _create_task_subset(osworld_dir, args.n_tasks)
         print(f"  Task file:   {task_file}")
 
         all_results = {}
-        for provider in providers:
-            result_dir = f"./results_bench_{provider}_{args.n_tasks}"
-            print(f"\nRunning: {provider} ({args.n_tasks} tasks)...")
+        for env in envs:
+            provider = _env_to_provider.get(env, env)
+            result_dir = f"./results_bench_{env}_{args.n_tasks}"
+            print(f"\nRunning: {env} ({args.n_tasks} tasks)...")
             r = run_osworld(osworld_dir, provider, task_file, result_dir,
-                            args.model, args.max_steps, args.num_envs)
-            all_results[provider] = r
+                            args.model, args.max_steps, args.concurrency)
+            all_results[env] = r
             print(f"  Done: {r['wall_time_s']:.0f}s, {r['tasks']} tasks, {r['pass']} pass")
 
         docker = all_results.get("docker", {"tasks": 0, "pass": 0, "fail": 0,
                                              "errors": 0, "per_domain": {}, "scores": []})
-        adl = all_results.get("adl", docker)
+        nitrobox = all_results.get("nitrobox", docker)
 
     # Results
     print("\n" + "=" * 68)
     print("RESULTS")
     print("=" * 68 + "\n")
-    print(_format_results_table(docker, adl))
+    print(_format_results_table(docker, nitrobox))
 
     # Correctness
     d_rate = docker['pass'] / docker['tasks'] * 100 if docker['tasks'] else 0
-    a_rate = adl['pass'] / adl['tasks'] * 100 if adl['tasks'] else 0
+    n_rate = nitrobox['pass'] / nitrobox['tasks'] * 100 if nitrobox['tasks'] else 0
 
     print(f"\nCorrectness:")
-    if abs(d_rate - a_rate) < 5.0 and docker['tasks'] > 0:
-        print(f"  ✓ Pass rates match: Docker {d_rate:.1f}% vs nitrobox {a_rate:.1f}%")
-        print(f"    → Seamless drop-in replacement confirmed")
+    if abs(d_rate - n_rate) < 5.0 and docker['tasks'] > 0:
+        print(f"  Pass rates match: Docker {d_rate:.1f}% vs nitrobox {n_rate:.1f}%")
     elif docker['tasks'] == 0:
-        print(f"  nitrobox only: {a_rate:.1f}% pass rate")
+        print(f"  nitrobox only: {n_rate:.1f}% pass rate")
     else:
-        print(f"  ✗ Pass rates differ: Docker {d_rate:.1f}% vs nitrobox {a_rate:.1f}%")
+        print(f"  Pass rates differ: Docker {d_rate:.1f}% vs nitrobox {n_rate:.1f}%")
 
     if args.output:
         with open(args.output, "w") as f:
-            json.dump({"docker": docker, "adl": adl}, f, indent=2, default=str)
+            json.dump({"docker": docker, "nitrobox": nitrobox}, f, indent=2, default=str)
         print(f"\nResults saved to {args.output}")
 
 
