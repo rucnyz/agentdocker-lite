@@ -47,8 +47,3 @@ tar = "0.4"
 flate2 = "1"
 log = "0.4"
 env_logger = "0.11"
-
-# For checkpoint helper: read containerd/Docker boltdb metadata
-jammdb = "0.11"
-sha2 = "0.10"
-hex = "0.4"

@@ -245,7 +245,7 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "extra_hosts", "sysctls",
     # Cosmetic / informational — safe to ignore silently
     "container_name", "profiles", "stdin_open", "tty",
-    "labels", "logging",
+    "labels", "logging", "expose",
     # Not needed: host networking replaces custom networks
     "networks",
     # Docker Compose fields parsed for compatibility but mapped to
@@ -313,6 +313,28 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def _resolve_build_contexts(layer: dict, compose_dir: Path) -> None:
+    """Resolve relative build context paths against the compose file's directory.
+
+    Docker Compose resolves relative paths in each file relative to that
+    file's parent directory.  We do this before merging so that each
+    file's paths are absolute before they get overwritten.
+    """
+    for svc in (layer.get("services") or {}).values():
+        if not isinstance(svc, dict):
+            continue
+        build = svc.get("build")
+        if build is None:
+            continue
+        if isinstance(build, str):
+            resolved = (compose_dir / build).resolve()
+            svc["build"] = str(resolved)
+        elif isinstance(build, dict) and "context" in build:
+            ctx = build["context"]
+            if not os.path.isabs(ctx):
+                build["context"] = str((compose_dir / ctx).resolve())
+
+
 def _parse_compose(
     compose_file: Path | list[Path],
     env: dict[str, str],
@@ -332,6 +354,9 @@ def _parse_compose(
         text = Path(f).read_text()
         text = _substitute(text, env)
         layer = yaml.safe_load(text) or {}
+        # Resolve relative build context paths against this file's directory
+        # BEFORE merging, so we know which file defined them.
+        _resolve_build_contexts(layer, Path(f).parent)
         data = _deep_merge(data, layer)
 
     services_raw = data.get("services", {})

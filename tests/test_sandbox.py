@@ -2214,11 +2214,11 @@ class TestRegistry:
 
 
 class TestImagePullPipeline:
-    """Test the three-layer pull pipeline:
+    """Test the image pull pipeline:
 
-    1. containers/storage local hit (zero-copy)
-    2. Docker daemon local → copy to containers/storage
-    3. Registry remote → pull to containers/storage
+    1. containers/storage local cache hit (zero-copy, instant)
+    2. ``docker://`` registry pull (standard path)
+    3. ``docker-daemon:`` fallback (for local-only Docker images)
 
     Plus: image delete, pull failure handling.
     """
@@ -2270,46 +2270,11 @@ class TestImagePullPipeline:
                 "nonexistent/image:v999", Path("/tmp"), pull=False,
             )
 
-    # -- Layer 2: Docker daemon local --------------------------------- #
-
-    def test_pull_from_docker_daemon(self):
-        """Image in Docker but not in containers/storage uses docker-daemon transport."""
-        self._skip_if_no_gobin()
-        self._skip_if_no_docker()
-        from nitrobox.image.layers import (
-            _containers_storage_pull,
-            _get_store_layers,
-        )
-
-        image = "alpine:latest"
-
-        # Ensure it's in Docker
-        subprocess.run(
-            ["docker", "pull", "-q", image],
-            capture_output=True, timeout=120,
-        )
-
-        # Remove from containers/storage (force docker-daemon path)
-        if _get_store_layers(image) is not None:
-            self._delete_image(image)
-        assert _get_store_layers(image) is None, "image should not be in store"
-
-        # Pull — should use docker-daemon transport
-        transport = _containers_storage_pull(image)
-        assert transport, "pull failed"
-        assert transport == "docker-daemon", \
-            f"expected docker-daemon transport, got {transport!r}"
-
-        layers = _get_store_layers(image)
-        assert layers is not None
-        assert len(layers) >= 1
-
-    # -- Layer 3: Registry remote ------------------------------------- #
+    # -- Layer 2: Registry pull ---------------------------------------- #
 
     def test_pull_from_registry(self):
-        """Image not in Docker or store uses docker (registry) transport."""
+        """Image not in store is pulled from registry."""
         self._skip_if_no_gobin()
-        self._skip_if_no_docker()
         _skip_if_no_registry()
         from nitrobox.image.layers import (
             _containers_storage_pull,
@@ -2321,12 +2286,6 @@ class TestImagePullPipeline:
         # Remove from containers/storage
         if _get_store_layers(image) is not None:
             self._delete_image(image)
-
-        # Remove from Docker too — force registry path
-        subprocess.run(
-            ["docker", "rmi", "-f", image],
-            capture_output=True, timeout=30,
-        )
 
         transport = _containers_storage_pull(image)
         assert transport, "registry pull failed"
@@ -2341,6 +2300,41 @@ class TestImagePullPipeline:
             for d in layers
         )
         assert has_content, "pulled image has no rootfs content"
+
+    # -- Layer 3: Docker daemon fallback ------------------------------- #
+
+    def test_pull_docker_daemon_fallback(self):
+        """Image only in Docker (not on registry) uses docker-daemon fallback."""
+        self._skip_if_no_gobin()
+        self._skip_if_no_docker()
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _get_store_layers,
+        )
+
+        # Build a local-only image in Docker (not on any registry)
+        tag = "nbx-test-local-only:latest"
+        subprocess.run(
+            ["docker", "build", "-t", tag, "-"],
+            input=b"FROM alpine:latest\nRUN echo local > /marker.txt\n",
+            capture_output=True, timeout=120,
+        )
+
+        # Remove from containers/storage
+        if _get_store_layers(tag) is not None:
+            self._delete_image(tag)
+
+        # Pull — registry fails (image doesn't exist), falls back to docker-daemon
+        transport = _containers_storage_pull(tag)
+        assert transport, "pull failed"
+        assert transport == "docker-daemon", \
+            f"expected docker-daemon fallback, got {transport!r}"
+
+        layers = _get_store_layers(tag)
+        assert layers is not None
+
+        # Cleanup
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 
     def test_pull_nonexistent_image_fails(self):
         """Pulling a nonexistent image returns False."""
@@ -2431,6 +2425,345 @@ class TestImagePullPipeline:
         # Second call: should hit containers/storage cache (no pull)
         layers2 = prepare_rootfs_layers_from_docker(image, Path("/tmp"), pull=False)
         assert layers1 == layers2
+
+
+# ------------------------------------------------------------------ #
+#  Layer locking                                                        #
+# ------------------------------------------------------------------ #
+
+
+class TestLayerLocking:
+    """Test acquire_layer_locks / release_layer_locks / remove_layer_locked."""
+
+    def test_acquire_release_round_trip(self, tmp_path):
+        """Acquire shared locks, then release — no errors."""
+        from nitrobox.image.layers import acquire_layer_locks, release_layer_locks
+
+        dirs = []
+        for i in range(3):
+            d = tmp_path / f"layer_{i}" / "diff"
+            d.mkdir(parents=True)
+            dirs.append(d)
+
+        fds = acquire_layer_locks(dirs)
+        assert len(fds) == 3
+        assert all(isinstance(fd, int) and fd >= 0 for fd in fds)
+        release_layer_locks(fds)
+
+    def test_concurrent_shared_locks(self, tmp_path):
+        """Multiple shared locks on the same layer don't block."""
+        from nitrobox.image.layers import acquire_layer_locks, release_layer_locks
+
+        d = tmp_path / "shared_layer" / "diff"
+        d.mkdir(parents=True)
+
+        fds1 = acquire_layer_locks([d])
+        fds2 = acquire_layer_locks([d])  # should not block
+        assert len(fds1) == 1 and len(fds2) == 1
+
+        release_layer_locks(fds1)
+        release_layer_locks(fds2)
+
+    def test_remove_layer_locked_skips_when_held(self, tmp_path):
+        """remove_layer_locked skips deletion when shared lock is held."""
+        from nitrobox.image.layers import (
+            acquire_layer_locks,
+            release_layer_locks,
+            remove_layer_locked,
+        )
+
+        d = tmp_path / "locked_layer" / "diff"
+        d.mkdir(parents=True)
+        (d / "file.txt").write_text("keep me")
+
+        # Hold a shared lock
+        fds = acquire_layer_locks([d])
+        # Try to delete — should skip (LOCK_NB fails)
+        remove_layer_locked(d)
+        assert d.exists(), "layer dir should survive when lock is held"
+        assert (d / "file.txt").exists()
+
+        release_layer_locks(fds)
+
+    def test_remove_layer_locked_deletes_when_free(self, tmp_path):
+        """remove_layer_locked deletes when no lock is held."""
+        from nitrobox.image.layers import remove_layer_locked
+
+        d = tmp_path / "free_layer" / "diff"
+        d.mkdir(parents=True)
+        (d / "file.txt").write_text("delete me")
+
+        remove_layer_locked(d)
+        assert not d.exists(), "layer dir should be deleted when no lock held"
+
+
+# ------------------------------------------------------------------ #
+#  rmtree_mapped                                                        #
+# ------------------------------------------------------------------ #
+
+
+class TestRmtreeMapped:
+    """Test rmtree_mapped for normal and mapped-UID directories."""
+
+    def test_normal_directory(self, tmp_path):
+        """rmtree_mapped removes a normal user-owned directory."""
+        from nitrobox.image.layers import rmtree_mapped
+
+        d = tmp_path / "normal"
+        d.mkdir()
+        (d / "file.txt").write_text("hello")
+        (d / "sub").mkdir()
+        (d / "sub" / "nested.txt").write_text("nested")
+
+        rmtree_mapped(d)
+        assert not d.exists()
+
+    def test_nonexistent_is_noop(self, tmp_path):
+        """rmtree_mapped on nonexistent path does nothing."""
+        from nitrobox.image.layers import rmtree_mapped
+
+        rmtree_mapped(tmp_path / "does_not_exist")  # should not raise
+
+    def test_mapped_uid_directory(self, tmp_path, shared_cache_dir):
+        """rmtree_mapped handles directories with mapped-UID files."""
+        _requires_gobin()
+        from nitrobox import Sandbox, SandboxConfig
+        from nitrobox.image.layers import rmtree_mapped
+
+        # Create a sandbox that writes files as mapped UIDs
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="rmtree-test")
+        box.run("touch /workspace/mapped_file")
+
+        # Get the upper dir (contains mapped-UID files)
+        upper = box._upper_dir
+        assert upper is not None and upper.exists()
+
+        # Kill shell, copy upper to test dir, then clean up sandbox
+        pid = box._persistent_shell.pid
+        import shutil
+        test_dir = tmp_path / "mapped_copy"
+        shutil.copytree(str(upper), str(test_dir))
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        Sandbox.cleanup_stale(str(tmp_path / "envs"))
+
+        # Now test rmtree_mapped on the copy
+        if test_dir.exists():
+            rmtree_mapped(test_dir)
+            assert not test_dir.exists(), "mapped-UID dir should be removed"
+
+
+# ------------------------------------------------------------------ #
+#  Go binary commands: image-layers, image-list                         #
+# ------------------------------------------------------------------ #
+
+
+class TestGoImageCommands:
+    """Test image-layers and image-list Go commands."""
+
+    @staticmethod
+    def _skip_if_no_gobin():
+        from nitrobox._gobin import gobin
+        import shutil
+        if not shutil.which(gobin()) and not os.path.isfile(gobin()):
+            pytest.skip("nitrobox-core Go binary not found")
+
+    @staticmethod
+    def _ensure_image(image: str):
+        """Ensure image is in containers/storage."""
+        from nitrobox.image.layers import _get_store_layers, _containers_storage_pull
+        if _get_store_layers(image) is None:
+            result = _containers_storage_pull(image)
+            assert result, f"failed to pull {image}"
+
+    def test_image_layers(self):
+        """ImageLayers returns correct overlay diff paths via Python API."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import _get_store_layers
+
+        image = "alpine:latest"
+        self._ensure_image(image)
+
+        layers = _get_store_layers(image)
+        assert layers is not None, "alpine should be in store"
+        assert len(layers) >= 1
+        for d in layers:
+            assert d.is_dir(), f"layer path not a directory: {d}"
+            # Should be an overlay diff directory
+            assert "diff" in str(d) or "dir" in str(d)
+
+    def test_image_list(self):
+        """_get_store_layers can find images after pull."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import _get_store_layers
+
+        image = "alpine:latest"
+        self._ensure_image(image)
+
+        # Verify the image is findable by _get_store_layers
+        layers = _get_store_layers(image)
+        assert layers is not None, "alpine should be in store after pull"
+        assert len(layers) >= 1
+        # Verify we can read files from the layer
+        has_content = any(
+            (d / "bin").exists() or (d / "usr").exists()
+            for d in layers
+        )
+        assert has_content, "pulled image has no rootfs content"
+
+    def test_image_layers_nonexistent(self):
+        """_get_store_layers returns None for nonexistent image."""
+        from nitrobox.image.layers import _get_store_layers
+
+        assert _get_store_layers("nonexistent/image:v999") is None
+
+
+# ------------------------------------------------------------------ #
+#  _containers_storage_root and _get_store_layers edge cases            #
+# ------------------------------------------------------------------ #
+
+
+class TestContainersStorageHelpers:
+    """Unit tests for storage helper functions."""
+
+    def test_storage_root_env_override(self, tmp_path, monkeypatch):
+        """CONTAINERS_STORAGE_ROOT env var overrides default path."""
+        from nitrobox.image.layers import _containers_storage_root
+
+        custom = tmp_path / "custom_store"
+        custom.mkdir()
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(custom))
+        assert _containers_storage_root() == custom
+
+    def test_storage_root_default(self, monkeypatch):
+        """Without env var, returns ~/.local/share/containers/storage or None."""
+        from nitrobox.image.layers import _containers_storage_root
+
+        monkeypatch.delenv("CONTAINERS_STORAGE_ROOT", raising=False)
+        result = _containers_storage_root()
+        # Either None (dir doesn't exist) or the default path
+        if result is not None:
+            assert "containers/storage" in str(result)
+
+    def test_get_store_layers_nonexistent_store(self, monkeypatch):
+        """_get_store_layers returns None when store doesn't exist."""
+        from nitrobox.image.layers import _get_store_layers
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", "/tmp/nonexistent_store_12345")
+        assert _get_store_layers("alpine:latest") is None
+
+    def test_get_store_layers_name_matching(self):
+        """_get_store_layers matches images by name variants."""
+        _requires_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import _get_store_layers, _containers_storage_pull
+
+        # Ensure alpine is in store
+        if _get_store_layers("alpine:latest") is None:
+            _containers_storage_pull("alpine:latest")
+
+        # Exact match
+        layers = _get_store_layers("alpine:latest")
+        assert layers is not None
+
+        # Without :latest tag
+        layers2 = _get_store_layers("alpine")
+        assert layers2 is not None
+
+    def test_get_store_layers_empty_store(self, tmp_path, monkeypatch):
+        """_get_store_layers returns None for empty store directory."""
+        from nitrobox.image.layers import _get_store_layers
+
+        empty_store = tmp_path / "empty_store"
+        empty_store.mkdir()
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(empty_store))
+        assert _get_store_layers("alpine:latest") is None
+
+    def test_read_config_from_containers_storage(self, tmp_path, monkeypatch):
+        """_read_config_from_containers_storage reads WORKDIR/CMD/ENV from OCI config blob."""
+        import base64, json
+        from nitrobox.image.store import _read_config_from_containers_storage
+
+        # Build a fake containers/storage tree
+        store = tmp_path / "store"
+        images_dir = store / "overlay-images"
+        images_dir.mkdir(parents=True)
+
+        img_id = "abc123def456" * 4 + "00000000"  # 56 chars
+        img_id = img_id[:64]
+
+        # Write images.json
+        (images_dir / "images.json").write_text(json.dumps([{
+            "id": img_id,
+            "names": ["localhost/myapp-main:latest"],
+            "layer": "somelayer",
+        }]))
+
+        # Write OCI config blob in big-data dir
+        bd_dir = images_dir / img_id
+        bd_dir.mkdir()
+
+        oci_config = {
+            "config": {
+                "Env": ["PATH=/usr/bin", "FOO=bar"],
+                "Cmd": ["/bin/sh"],
+                "Entrypoint": ["python", "app.py"],
+                "WorkingDir": "/app",
+                "ExposedPorts": {"8080/tcp": {}},
+            },
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": ["sha256:aaa", "sha256:bbb"],
+            },
+        }
+
+        # Write manifest pointing to config
+        config_digest = f"sha256:{img_id}"
+        (bd_dir / "manifest").write_text(json.dumps({
+            "config": {"digest": config_digest},
+        }))
+
+        # Write config blob with base64-encoded filename
+        encoded_name = "=" + base64.b64encode(config_digest.encode()).decode()
+        (bd_dir / encoded_name).write_text(json.dumps(oci_config))
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(store))
+
+        cfg = _read_config_from_containers_storage("localhost/myapp-main:latest")
+        assert cfg is not None
+        assert cfg["working_dir"] == "/app"
+        assert cfg["cmd"] == ["/bin/sh"]
+        assert cfg["entrypoint"] == ["python", "app.py"]
+        assert cfg["env"] == {"PATH": "/usr/bin", "FOO": "bar"}
+        assert cfg["exposed_ports"] == [8080]
+        assert cfg["diff_ids"] == ["sha256:aaa", "sha256:bbb"]
+
+    def test_read_config_from_containers_storage_miss(self, tmp_path, monkeypatch):
+        """_read_config_from_containers_storage returns None for unknown images."""
+        from nitrobox.image.store import _read_config_from_containers_storage
+
+        store = tmp_path / "store"
+        images_dir = store / "overlay-images"
+        images_dir.mkdir(parents=True)
+        (images_dir / "images.json").write_text("[]")
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(store))
+        assert _read_config_from_containers_storage("no-such-image") is None
+
+    def test_read_config_from_containers_storage_no_store(self, monkeypatch):
+        """_read_config_from_containers_storage returns None when store doesn't exist."""
+        from nitrobox.image.store import _read_config_from_containers_storage
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", "/tmp/nonexistent_xyz_99999")
+        assert _read_config_from_containers_storage("anything") is None
 
 
 # ------------------------------------------------------------------ #

@@ -127,7 +127,7 @@ def _containers_storage_pull(image_name: str) -> bool | str:
 
     Returns:
         ``False`` on failure, or a transport string
-        (``"docker-daemon"``, ``"docker"``, ``"explicit"``) on success.
+        (``"docker"``, ``"explicit"``) on success.
     """
     from nitrobox._gobin import gobin
     bin_path = gobin()
@@ -174,7 +174,7 @@ def _containers_storage_pull(image_name: str) -> bool | str:
         timeout=600,
     )
     if r.returncode != 0:
-        logger.warning("image-pull failed: %s", r.stderr.decode().strip()[:500])
+        logger.debug("image-pull failed: %s", r.stderr.decode().strip()[:500])
         return False
     # Parse pull result JSON (contains transport used)
     try:
@@ -196,9 +196,9 @@ def prepare_rootfs_layers_from_docker(
 ) -> list[Path]:
     """Get image layers as directories for overlayfs stacking.
 
-    Uses containers/storage for zero-copy layer access:
-      1. Check if image exists in store → return diff paths directly
-      2. Pull from registry into store → return diff paths
+    Layer resolution order:
+      1. containers/storage (user-owned, zero-copy) — cached
+      2. Pull from registry into containers/storage
 
     Args:
         image_name: Image reference (e.g. ``"ubuntu:22.04"``).
@@ -208,14 +208,14 @@ def prepare_rootfs_layers_from_docker(
     Returns:
         Ordered list of layer directories (bottom to top).
     """
-    # 1. Check containers/storage
+    # 1. Check containers/storage (zero-copy, user-owned)
     layers = _get_store_layers(image_name)
     if layers is not None:
         logger.info("Layer cache ready for %s: %d layers (zero-copy)",
                      image_name, len(layers))
         return layers
 
-    # 2. Pull into store
+    # 2. Pull from registry into containers/storage
     if pull:
         logger.info("Pulling %s into containers/storage", image_name)
         if not _containers_storage_pull(image_name):

@@ -47,6 +47,7 @@ func main() {
 				reqJSON, _ := json.Marshal(req)
 				os.Setenv("_NITROBOX_PULL_CONFIG", string(reqJSON))
 			}
+
 			unshare.MaybeReexecUsingUserNamespace(false)
 			os.Unsetenv("_NITROBOX_PULL_CONFIG")
 
@@ -185,33 +186,6 @@ func main() {
 			}
 			fmt.Println(result)
 			return nil
-		},
-	})
-
-	rootCmd.AddCommand(&cobra.Command{
-		Use:   "docker-layers",
-		Short: "Get overlay layer paths from Docker's local containerd storage (no daemon)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var req struct {
-				Image         string `json:"image"`
-				ContainerdRoot string `json:"containerd_root"` // default: /var/lib/containerd
-			}
-			if err := readJSON(&req); err != nil {
-				return err
-			}
-			paths := nbximage.DefaultContainerdPaths()
-			if req.ContainerdRoot != "" {
-				root := req.ContainerdRoot
-				paths.MetaDB = root + "/io.containerd.metadata.v1.bolt/meta.db"
-				paths.ContentDir = root + "/io.containerd.content.v1.content/blobs/sha256"
-				paths.SnapDB = root + "/io.containerd.snapshotter.v1.overlayfs/metadata.db"
-				paths.SnapDir = root + "/io.containerd.snapshotter.v1.overlayfs/snapshots"
-			}
-			layers, err := nbximage.DockerLocalLayers(req.Image, paths)
-			if err != nil {
-				return err
-			}
-			return writeJSON(layers)
 		},
 	})
 

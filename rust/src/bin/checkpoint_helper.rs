@@ -227,23 +227,15 @@ fn main() {
         die(&format!("can't open CRIU binary {}: {}", criu.display(),
                      std::io::Error::last_os_error()));
     }
-    // Clear O_CLOEXEC so the fd survives into the exec'd CRIU process
-    // if we use /proc/self/fd/N. Actually for exec via path we need
-    // the fd to stay open for the /proc/self/fd/N path resolution.
     unsafe {
         let flags = libc::fcntl(criu_fd, libc::F_GETFD);
         libc::fcntl(criu_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
     }
     let criu_exec_path = format!("/proc/self/fd/{criu_fd}");
 
-    // For dump: the images dir is on the host filesystem, but after
-    // entering the sandbox mount ns, host paths are invisible.  Use a
-    // tmpfs inside the mount ns for CRIU, then copy images back via a
-    // pre-opened fd to the host directory.
     let images_host_fd: Option<i32>;
     let images_mount: Option<String> = if subcommand == "dump" {
         if let Some(ref abs) = images_abs {
-            // Open a writable fd to the host images dir BEFORE setns.
             let dir_fd = unsafe {
                 let p = CString::new(abs.to_string_lossy().as_bytes().to_vec()).unwrap();
                 libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
@@ -254,10 +246,8 @@ fn main() {
             }
             images_host_fd = Some(dir_fd);
 
-            // Enter sandbox's mount namespace.
             enter_ns(ns_pid, "mnt", libc::CLONE_NEWNS);
 
-            // Mount a tmpfs for CRIU to write images into.
             let target = "/tmp/.nitrobox-criu-images";
             let _ = fs::create_dir_all(target);
             let src = CString::new("tmpfs").unwrap();
@@ -277,15 +267,10 @@ fn main() {
             None
         }
     } else {
-        // Restore: stay in init namespace with full root capabilities.
         images_host_fd = None;
         None
     };
 
-    // For dump: exec CRIU via /proc/self/fd/N (host binary not visible
-    // after setns into sandbox mount ns).
-    // For restore: exec via filesystem path so kernel applies file
-    // capabilities (file caps are NOT read for /proc/self/fd/N exec).
     let exec_path = if images_mount.is_some() {
         criu_exec_path.clone()
     } else {
@@ -293,11 +278,6 @@ fn main() {
     };
     let mut cmd = Command::new(&exec_path);
 
-    // Both dump and restore: CRIU needs full root capabilities.
-    // The helper is setuid root (euid=0).  After fork, the child
-    // inherits euid=0.  We setresuid to (0,0,0) to make ruid=0 as
-    // well — this ensures exec of CRIU preserves root caps (no
-    // euid 0→non-0 transition that would clear caps).
     unsafe {
         cmd.pre_exec(move || {
             if libc::setresgid(0, 0, 0) != 0 {
@@ -311,7 +291,6 @@ fn main() {
     }
     cmd.arg(subcommand);
 
-    // Pass through args, substituting --ns-pid, --images-dir, --root
     let mut skip_next = false;
     let mut skip_key = "";
     for arg in criu_args {
@@ -320,21 +299,18 @@ fn main() {
             match skip_key {
                 "--images-dir" => {
                     if let Some(ref mnt) = images_mount {
-                        // Use bind-mounted path inside sandbox mount ns.
                         cmd.arg(mnt);
                     } else if let Some(ref abs) = images_abs {
                         cmd.arg(abs);
                     }
                 }
                 "--root" => {
-                    // For dump: not needed (inside mount ns).
-                    // For restore: use bind-mounted criu-root.
                     if let Some(ref cr) = criu_root {
                         cmd.arg("--root");
                         cmd.arg(cr);
                     }
                 }
-                _ => {} // --ns-pid: skip entirely
+                _ => {}
             }
             continue;
         }
@@ -352,14 +328,11 @@ fn main() {
     cmd.arg("--log-file").arg(format!("{subcommand}.log"));
     cmd.arg("-v4");
 
-    // Run CRIU (as root, full capabilities)
     let status = cmd.status()
         .unwrap_or_else(|e| die(&format!("exec criu failed: {e}")));
 
-    // For dump: copy images from tmpfs back to host dir, then clean up.
     if let Some(ref mnt) = images_mount {
         if let Some(host_fd) = images_host_fd {
-            // Copy each file from tmpfs → host dir via fd.
             let saved = unsafe { libc::open(c".".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
             if unsafe { libc::fchdir(host_fd) } == 0 {
                 if let Ok(entries) = fs::read_dir(mnt) {
@@ -378,7 +351,6 @@ fn main() {
             }
             unsafe { libc::close(host_fd) };
         }
-        // Unmount tmpfs
         unsafe {
             let dst = CString::new(mnt.as_str()).unwrap();
             libc::umount2(dst.as_ptr(), libc::MNT_DETACH);
@@ -386,13 +358,10 @@ fn main() {
         let _ = fs::remove_dir(mnt);
     }
 
-    // Chown outputs back to caller so restore (which execs CRIU with
-    // caller's real UID via file capabilities) can read the images.
     if let Some(ref abs) = images_abs {
         chown_recursive(abs, caller_uid, caller_gid);
     }
 
-    // Cleanup bind mount
     if let Some(ref cr) = criu_root {
         unsafe {
             let dst = CString::new(cr.as_str()).unwrap();

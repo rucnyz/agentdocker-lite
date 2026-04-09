@@ -7,7 +7,6 @@ require (
 	github.com/spf13/cobra v1.10.2
 	go.podman.io/image/v5 v5.39.2
 	go.podman.io/storage v1.62.0
-	golang.org/x/sys v0.42.0
 )
 
 require (
@@ -123,6 +122,7 @@ require (
 	golang.org/x/mod v0.28.0 // indirect
 	golang.org/x/net v0.45.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250414145226-207652e42e2e // indirect

@@ -47,6 +47,7 @@ func OpenStore(cfg StoreConfig) (storage.Store, error) {
 		GraphDriverOptions: []string{
 			"overlay.mount_program=/usr/bin/fuse-overlayfs",
 			"overlay.mountopt=userxattr",
+			"overlay.ignore_chown_errors=true",
 		},
 	}
 	// For rootless on ext4: if native overlay doesn't work, fall back to vfs.
@@ -54,7 +55,7 @@ func OpenStore(cfg StoreConfig) (storage.Store, error) {
 	store, err := storage.GetStore(opts)
 	if err != nil {
 		// Fallback: try without mount_program
-		opts.GraphDriverOptions = []string{"overlay.mountopt=userxattr"}
+		opts.GraphDriverOptions = []string{"overlay.mountopt=userxattr", "overlay.ignore_chown_errors=true"}
 		store, err = storage.GetStore(opts)
 	}
 	if err != nil {
@@ -131,17 +132,10 @@ type PullResult struct {
 	Transport string `json:"transport"` // "docker-daemon", "docker", or "explicit"
 }
 
-// PullImage pulls an image into containers/storage.
-//
-// Search order (mirrors Docker Compose behavior):
-//  1. docker-daemon: — copy from local Docker daemon (fast, no network)
-//  2. docker:// — pull from registry (fallback)
-//
-// Returns PullResult indicating which transport was used.
+// PullImage pulls an image from a registry into containers/storage.
 func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.SystemContext) (*PullResult, error) {
 	ctx := context.Background()
 
-	// Destination in containers/storage
 	storageName := imageRef
 	for _, prefix := range []string{"docker://", "docker-daemon:"} {
 		storageName = strings.TrimPrefix(storageName, prefix)
@@ -174,26 +168,29 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 		return &PullResult{Transport: "explicit"}, nil
 	}
 
-	// Try docker-daemon: first (local Docker, no network needed).
-	daemonRef, daemonErr := alltransports.ParseImageName("docker-daemon:" + imageRef)
-	if daemonErr == nil {
-		_, err = cp.Image(ctx, policy, destRef, daemonRef, &cp.Options{SourceCtx: systemCtx})
-		if err == nil {
-			return &PullResult{Transport: "docker-daemon"}, nil
-		}
-		// Docker daemon not available or image not found — fall through to registry.
-	}
-
-	// Fallback: pull from registry.
+	// Pull from registry.
 	srcRef, err := alltransports.ParseImageName("docker://" + imageRef)
 	if err != nil {
 		return nil, fmt.Errorf("parse source %q: %w", imageRef, err)
 	}
 	_, err = cp.Image(ctx, policy, destRef, srcRef, &cp.Options{SourceCtx: systemCtx})
-	if err != nil {
-		return nil, fmt.Errorf("pull %q: %w", imageRef, err)
+	if err == nil {
+		return &PullResult{Transport: "docker"}, nil
 	}
-	return &PullResult{Transport: "docker"}, nil
+
+	// Last resort: try local Docker daemon (for locally-built images
+	// that were never pushed to a registry). Slow but functional.
+	registryErr := err
+	daemonRef, daemonErr := alltransports.ParseImageName("docker-daemon:" + imageRef)
+	if daemonErr == nil {
+		_, err2 := cp.Image(ctx, policy, destRef, daemonRef, &cp.Options{SourceCtx: systemCtx})
+		if err2 == nil {
+			return &PullResult{Transport: "docker-daemon"}, nil
+		}
+		return nil, fmt.Errorf("pull %q: registry: %v; docker-daemon: %v", imageRef, registryErr, err2)
+	}
+
+	return nil, fmt.Errorf("pull %q: %w", imageRef, registryErr)
 }
 
 // BuildImage builds a Dockerfile using buildah.
@@ -204,7 +201,7 @@ func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string
 		Output:                 tag,
 		ContextDirectory:       contextDir,
 		CommonBuildOpts:        &define.CommonBuildOptions{},
-		Layers:                 false, // avoid intermediate commits that trigger broken pipe
+		Layers:                 true,
 		RemoveIntermediateCtrs: true,
 		// IsolationOCIRootless: uses runc for proper rootless container execution.
 		// This is what podman uses for rootless builds.

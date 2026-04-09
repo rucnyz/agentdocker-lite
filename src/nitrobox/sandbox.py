@@ -677,6 +677,7 @@ class Sandbox:
 
         rootfs = getattr(self, "_rootfs", None)
         base_rootfs = getattr(self, "_base_rootfs", None)
+
         if not self._userns and rootfs:
             from nitrobox._core import py_umount
             try:
@@ -1724,6 +1725,7 @@ class Sandbox:
         In userns mode the overlayfs is inside the sandbox mount namespace
         (not visible from the host), so we manually search:
         upper_dir → each layer dir (top to bottom) → fallback to upper.
+
         """
         if self._userns:
             assert self._upper_dir is not None
