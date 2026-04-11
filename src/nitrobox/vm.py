@@ -124,7 +124,7 @@ class QemuVM:
     #  Public API — Lifecycle                                              #
     # ================================================================== #
 
-    def start(self, timeout: int = 120) -> None:
+    def start(self, timeout: int = 120, incoming: str | None = None) -> None:
         """Start the QEMU VM and wait for QMP to be ready.
 
         Blocks until the QMP socket is ready (VM BIOS/firmware started).
@@ -133,13 +133,23 @@ class QemuVM:
 
         Args:
             timeout: Max seconds to wait for QMP socket.
+            incoming: Migration state file to restore from.  When set,
+                the VM is started with ``-incoming "exec: gzip -c -d
+                <file>"`` (or ``cat`` for uncompressed files) so the VM
+                state is restored from the file instead of booting from
+                scratch.  The base disk can be read-only; all writes
+                go to the ephemeral ``snapshot=on`` overlay.
+
+                This enables parallel VMs sharing a single read-only
+                base image — each instance restores independently
+                from the same migration file.
 
         Raises:
             TimeoutError: QMP socket not ready within *timeout*.
             FileNotFoundError: ``qemu-system-x86_64`` not found.
         """
         self._install_qmp_helper()
-        cmd = self._build_cmd()
+        cmd = self._build_cmd(incoming=incoming)
 
         if self._cmd_override:
             # Complex commands with special shell chars (e.g. parentheses
@@ -247,6 +257,49 @@ class QemuVM:
     def info_snapshots(self) -> str:
         """List all VM state snapshots."""
         return self.hmp("info snapshots")
+
+    def migrate_to_file(self, path: str, compress: bool = True) -> str:
+        """Export VM state to a file via QEMU migration.
+
+        Creates a portable state file that can be loaded by any QEMU
+        instance with matching configuration, even on a different host
+        or from a read-only base image.  Unlike :meth:`savevm`, the
+        state is NOT stored inside the QCOW2 — the base image stays
+        untouched.
+
+        Args:
+            path: Destination file path **inside the sandbox**.
+                If *compress* is True, gzip compression is applied.
+            compress: Whether to gzip-compress the output (recommended;
+                typical 4 GB RAM → 1.5-2 GB compressed).
+
+        Returns:
+            HMP ``info migrate`` output after completion.
+
+        Example::
+
+            vm.savevm("ready")          # optional: save first
+            vm.loadvm("ready")          # restore clean state
+            vm.migrate_to_file("/vms/vm_state.gz")
+            # Now /vms/vm_state.gz can be used with start(incoming=...)
+        """
+        if compress:
+            cmd = f'migrate "exec: gzip -1 -c > {path}"'
+        else:
+            cmd = f'migrate "exec: cat > {path}"'
+        self.hmp(cmd)
+
+        # Wait for migration to complete (polling info migrate).
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 300:
+            info = self.hmp("info migrate")
+            if "completed" in info.lower():
+                logger.info("migrate_to_file %r: %.1fs", path, time.monotonic() - t0)
+                return info
+            if "failed" in info.lower() or "error" in info.lower():
+                raise RuntimeError(f"Migration failed: {info}")
+            time.sleep(1)
+        raise TimeoutError(f"Migration not completed after 300s: {self.hmp('info migrate')}")
 
     # ================================================================== #
     #  Public API — QMP / HMP                                              #
@@ -489,7 +542,7 @@ class QemuVM:
     #  Internal — QEMU command line & startup                              #
     # ================================================================== #
 
-    def _build_cmd(self) -> str:
+    def _build_cmd(self, incoming: str | None = None) -> str:
         """Build the QEMU command line.
 
         If *cmd_override* was provided at construction, use it verbatim
@@ -498,6 +551,11 @@ class QemuVM:
 
         QGA (Guest Agent) is always enabled via a virtio-serial channel.
         The guest must have ``qemu-ga`` running to use :meth:`guest_exec`.
+
+        Args:
+            incoming: Path to a migration state file.  When set, adds
+                ``-incoming "exec: gzip -c -d <file>"`` to restore VM
+                state without booting from scratch.
         """
         qmp_spec = f"unix:{self._qmp_path},server,nowait"
         qga_chardev = f"socket,id=nbxqga,path={self._qga_path},server=on,wait=off"
@@ -508,15 +566,23 @@ class QemuVM:
             f"name=org.qemu.guest_agent.0"
         )
 
+        # Build -incoming argument for migration restore.
+        incoming_suffix = ""
+        if incoming:
+            if incoming.endswith(".gz"):
+                incoming_suffix = f' -incoming "exec: gzip -c -d {incoming}"'
+            else:
+                incoming_suffix = f' -incoming "exec: cat {incoming}"'
+
         if self._cmd_override:
-            return f"{self._cmd_override} -qmp {qmp_spec}{qga_suffix}"
+            return f"{self._cmd_override} -qmp {qmp_spec}{qga_suffix}{incoming_suffix}"
 
         args = [
             "qemu-system-x86_64",
             "-enable-kvm",
             "-m", self._memory,
             "-smp", str(self._cpus),
-            "-drive", f"file={self._disk},format=qcow2,if=virtio",
+            "-drive", f"file={self._disk},format=qcow2,if=virtio,snapshot=on",
             "-qmp", qmp_spec,
             "-chardev", qga_chardev,
             "-device", "virtio-serial-pci,id=nbx-vser",
@@ -526,7 +592,8 @@ class QemuVM:
             "-no-shutdown",
         ]
         args.extend(self._extra_args)
-        return " ".join(shlex.quote(a) for a in args)
+        cmd = " ".join(shlex.quote(a) for a in args)
+        return cmd + incoming_suffix
 
     def _wait_qmp(self, timeout: int) -> None:
         """Wait for the QMP socket to appear inside the sandbox."""
