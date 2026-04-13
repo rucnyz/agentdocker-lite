@@ -979,7 +979,7 @@ class Sandbox:
             "cap_drop": cap_names_to_numbers(config.cap_drop) if config.cap_drop else [],
             "hostname": config.hostname,
             "read_only": config.read_only,
-            "entrypoint": config.entrypoint or [],
+            "entrypoint": [],  # entrypoint is for run(), not the persistent shell
             "tty": config.tty,
             "lowerdir_spec": None,
             "upper_dir": None,
