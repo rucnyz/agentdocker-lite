@@ -1157,14 +1157,28 @@ class TestPortMap:
         )
         box = Sandbox(config, name="netns-cleanup")
         env_dir = box._env_dir
+        # Record pasta PID before delete
+        import subprocess
+        pasta_pids_before = {
+            int(p) for p in
+            subprocess.run(["pgrep", "-f", "pasta.*netns-cleanup"],
+                           capture_output=True, text=True).stdout.split()
+            if p.strip()
+        }
         box.delete()
 
         # env_dir should be gone
         assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
         # No /run/netns bind mount left
-        import subprocess
         mounts = subprocess.run(["mount"], capture_output=True, text=True).stdout
         assert "netns-cleanup" not in mounts, f"stale netns mount: {[l for l in mounts.splitlines() if 'netns-cleanup' in l]}"
+        # pasta process should be killed
+        for pid in pasta_pids_before:
+            try:
+                os.kill(pid, 0)
+                assert False, f"pasta process {pid} still alive after delete()"
+            except ProcessLookupError:
+                pass  # good — process is dead
 
     def test_delete_cleans_netns_userns(self, tmp_path, shared_cache_dir):
         """delete() with port_map leaves no stale .netns bind mounts (userns)."""

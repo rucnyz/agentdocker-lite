@@ -1638,7 +1638,8 @@ class Sandbox:
 
     def _stop_pasta_rootful(self) -> None:
         from nitrobox.network import stop_pasta_rootful
-        stop_pasta_rootful(getattr(self, '_netns_path', None))
+        env_dir = Path(self._env_dir) if hasattr(self, '_env_dir') and self._env_dir else None
+        stop_pasta_rootful(getattr(self, '_netns_path', None), env_dir=env_dir)
         self._netns_path = None
 
     @staticmethod

@@ -91,12 +91,15 @@ def start_pasta_rootful(
             cmd.extend(["-t", mapping])
     else:
         cmd.extend(["-t", "none"])
+    # Write PID file so stop_pasta_rootful can kill the daemon.
+    pasta_pid_file = str(env_dir / "pasta.pid")
     cmd.extend([
         "-u", "none", "-T", "none", "-U", "none",
         "--dns-forward", "169.254.1.1",
         "--no-map-gw", "--quiet",
         "--netns", netns_path,
         "--map-guest-addr", "169.254.1.2",
+        "-P", pasta_pid_file,
     ])
 
     out = subprocess.run(cmd, capture_output=True, text=True)
@@ -109,8 +112,34 @@ def start_pasta_rootful(
     return netns_path
 
 
-def stop_pasta_rootful(netns_path: str | None) -> None:
-    """Clean up rootful pasta netns bind mount."""
+def stop_pasta_rootful(
+    netns_path: str | None,
+    env_dir: Path | None = None,
+) -> None:
+    """Kill pasta daemon and clean up netns bind mount."""
+    # Kill pasta daemon and its children via PID file
+    if env_dir:
+        pid_file = env_dir / "pasta.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                # Kill entire process group to catch child processes
+                try:
+                    os.killpg(os.getpgid(pid), 9)
+                except (ProcessLookupError, PermissionError):
+                    # Fallback: kill just the PID
+                    try:
+                        os.kill(pid, 9)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                logger.debug("Killed pasta daemon pid=%d", pid)
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+
     if netns_path and os.path.exists(netns_path):
         from nitrobox._core import py_umount_lazy
         try:
