@@ -392,6 +392,12 @@ def main():
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--envs", default="docker,nitrobox")
     parser.add_argument("--output", default=None)
+    parser.add_argument("--task-file", default=None,
+                        help="Custom task list JSON (skip auto-balanced subset). "
+                             "Format: {\"domain\": [\"task_id\", ...]}")
+    parser.add_argument("--result-suffix", default=None,
+                        help="Suffix for result_bench_<env>_<suffix> dirs "
+                             "(default: n_tasks)")
     parser.add_argument("--parse-only", nargs=2, metavar=("DOCKER_DIR", "NITROBOX_DIR"),
                         help="Parse existing result dirs (skip running)")
     args = parser.parse_args()
@@ -419,13 +425,22 @@ def main():
             envs[1]: _parse_results(Path(osworld_dir) / args.parse_only[1], 0),
         }
     else:
-        task_file = _create_task_subset(osworld_dir, args.n_tasks)
-        print(f"  Task file:   {task_file}")
+        if args.task_file:
+            task_file = args.task_file
+            # Count actual tasks in custom file
+            with open(task_file) as _f:
+                _tf = json.load(_f)
+            actual_n = sum(len(v) for v in _tf.values())
+            print(f"  Task file:   {task_file} (custom, {actual_n} tasks)")
+        else:
+            task_file = _create_task_subset(osworld_dir, args.n_tasks)
+            print(f"  Task file:   {task_file}")
 
+        suffix = args.result_suffix or str(args.n_tasks)
         all_results = {}
         for env in envs:
             provider = _env_to_provider.get(env, env)
-            result_dir = f"./results_bench_{env}_{args.n_tasks}"
+            result_dir = f"./results_bench_{env}_{suffix}"
             print(f"\nRunning: {env} ({args.n_tasks} tasks)...")
             r = run_osworld(osworld_dir, provider, task_file, result_dir,
                             args.model, args.max_steps, args.concurrency)
