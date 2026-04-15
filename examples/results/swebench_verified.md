@@ -37,15 +37,15 @@ python examples/bench_harbor_e2e.py \
     --harbor-dir ../harbor \
     --dataset swebench-verified \
     --agent oracle \
-    --concurrency 10 \
-    --envs docker,nitrobox
+    --concurrency 20 \
+    --envs nitrobox,docker
 # for debug
 python examples/bench_harbor_e2e.py \
     --harbor-dir ../harbor \
     --dataset swebench-verified \
     --agent oracle \
     --n-tasks 20 --concurrency 10 \
-    --envs docker,nitrobox
+    --envs nitrobox,docker
 ```
 
 Or via harbor:

@@ -21,7 +21,7 @@ nitrobox.
 
 ```bash
 # 1. Install nitrobox + system helpers
-uv sync
+uv sync --all-extras --dev
 nitrobox setup
 
 # 2. Install uidmap (rootless multi-UID mapping)

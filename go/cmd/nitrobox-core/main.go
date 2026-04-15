@@ -10,6 +10,7 @@ import (
 	"go.podman.io/storage/pkg/reexec"
 	"go.podman.io/storage/pkg/unshare"
 
+	nbxbuildkit "github.com/opensage-agent/nitrobox/go/internal/buildkit"
 	nbximage "github.com/opensage-agent/nitrobox/go/internal/image"
 	"github.com/spf13/cobra"
 )
@@ -186,6 +187,65 @@ func main() {
 			}
 			fmt.Println(result)
 			return nil
+		},
+	})
+
+	// -- BuildKit commands ------------------------------------------------
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "buildkit-start",
+		Short: "Start managed buildkitd daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				BuildkitdBin string `json:"buildkitd_bin"`
+				RootDir      string `json:"root_dir"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			d := nbxbuildkit.NewDaemon()
+			if req.RootDir != "" {
+				d.RootDir = req.RootDir
+			}
+			if err := d.Start(req.BuildkitdBin); err != nil {
+				return err
+			}
+			return writeJSON(map[string]string{
+				"socket_path":   d.SocketPath,
+				"snapshot_root": d.SnapshotRoot(),
+			})
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "buildkit-stop",
+		Short: "Stop managed buildkitd daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d := nbxbuildkit.NewDaemon()
+			return d.Stop()
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "buildkit-build",
+		Short: "Build a Dockerfile via BuildKit",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				SocketPath string `json:"socket_path"`
+				Dockerfile string `json:"dockerfile"`
+				Context    string `json:"context"`
+				Tag        string `json:"tag"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			digest, err := nbxbuildkit.BuildImage(
+				req.SocketPath, req.Dockerfile, req.Context, req.Tag,
+			)
+			if err != nil {
+				return err
+			}
+			return writeJSON(map[string]string{"digest": digest})
 		},
 	})
 
