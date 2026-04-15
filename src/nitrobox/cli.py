@@ -279,153 +279,8 @@ def cmd_setup(args: argparse.Namespace) -> None:
     cgroup_dir = "/sys/fs/cgroup/nitrobox"
     vendor_dir = Path(__file__).parent / "_vendor"
     ok = True
-    manual_steps: list[str] = []
 
-    # ---- Docker check (required) -----------------------------------------
-    docker = shutil.which("docker")
-    if not docker:
-        print(
-            "ERROR: Docker is required for 'nitrobox setup'.\n"
-            "Without Docker, configure manually with sudo:"
-        )
-        manual_steps.append(
-            f"  sudo mkdir -p {cgroup_dir} && "
-            f"sudo chown {uid}:{gid} {cgroup_dir} && "
-            f"echo '+cpu +memory +pids +io +cpuset' | "
-            f"sudo tee {cgroup_dir}/cgroup.subtree_control"
-        )
-        criu_bin = vendor_dir / "criu"
-        if criu_bin.exists():
-            manual_steps.append(
-                f"  sudo setcap cap_checkpoint_restore,cap_sys_ptrace,cap_sys_admin+eip {criu_bin}"
-            )
-        for step in manual_steps:
-            print(step)
-        return
-
-    # ---- cgroup v2 check ------------------------------------------------
-    if not Path("/sys/fs/cgroup/cgroup.controllers").exists():
-        print("SKIP: cgroup v2 not available on this system.")
-        return
-
-    # ---- cgroup delegation -----------------------------------------------
-    cg_path = Path(cgroup_dir)
-    cg_procs = cg_path / "cgroup.procs"
-    # Check that both the directory AND cgroup.procs are writable.
-    # The directory can be writable while the control files inside are
-    # root-owned (e.g. after a reboot or partial setup).
-    cgroup_ok = (
-        cg_path.exists()
-        and os.access(cg_path, os.W_OK)
-        and cg_procs.exists()
-        and os.access(str(cg_procs), os.W_OK)
-    )
-    if cgroup_ok:
-        print(f"OK: cgroup delegation already configured ({cgroup_dir})")
-    else:
-        if cg_path.exists() and not os.access(str(cg_procs), os.W_OK):
-            print(f"WARN: {cgroup_dir} exists but cgroup.procs is not writable, re-configuring...")
-        print("Setting up cgroup delegation via Docker...")
-        result = subprocess.run(
-            [
-                docker, "run", "--rm",
-                "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw",
-                "alpine", "sh", "-c",
-                # 1. Create directory and enable controllers (as root)
-                f"mkdir -p {cgroup_dir} && "
-                f"echo '+cpu +memory +pids +io +cpuset' > "
-                f"{cgroup_dir}/cgroup.subtree_control && "
-                # 2. Chown AFTER enabling controllers (kernel creates
-                #    new control files when controllers are enabled)
-                f"chown {uid}:{gid} {cgroup_dir} && "
-                f"chown {uid}:{gid} {cgroup_dir}/cgroup.procs && "
-                f"chown {uid}:{gid} {cgroup_dir}/cgroup.subtree_control && "
-                f"chown {uid}:{gid} /sys/fs/cgroup/cgroup.procs",
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            print(f"OK: cgroup delegation configured ({cgroup_dir})")
-        else:
-            print(
-                f"ERROR: Docker cgroup setup failed:\n  {result.stderr.strip()}\n"
-                f"  Manual fix: sudo mkdir -p {cgroup_dir} && "
-                f"sudo chown {uid}:{gid} {cgroup_dir}"
-            )
-            ok = False
-
-    # ---- checkpoint helper (setuid) ----------------------------------------
-    helper_bin = vendor_dir / "nitrobox-checkpoint-helper"
-    system_helper = Path("/usr/local/bin/nitrobox-checkpoint-helper")
-    if not helper_bin.exists():
-        print("WARN: checkpoint helper binary not found in vendor dir")
-    else:
-        vendor_hash = _sha256(helper_bin)
-        system_hash = _sha256(system_helper) if system_helper.exists() else None
-        has_setuid = system_helper.exists() and bool(system_helper.stat().st_mode & 0o4000)
-        if system_hash == vendor_hash and has_setuid:
-            print("OK: checkpoint helper installed (setuid)")
-        else:
-            if system_hash is None:
-                action = "Installing"
-            elif system_hash != vendor_hash:
-                action = "Updating"
-            else:
-                action = "Re-installing"  # exists but missing setuid
-            print(f"{action} checkpoint helper (setuid) via Docker...")
-            result = subprocess.run(
-                [
-                    docker, "run", "--rm",
-                    "-v", f"{helper_bin}:/tmp/helper:ro",
-                    "-v", "/usr/local/bin:/host-bin",
-                    "alpine", "sh", "-c",
-                    "cp /tmp/helper /host-bin/nitrobox-checkpoint-helper && "
-                    "chown root:root /host-bin/nitrobox-checkpoint-helper && "
-                    "chmod u+s /host-bin/nitrobox-checkpoint-helper",
-                ],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                print("OK: checkpoint helper installed (setuid)")
-            else:
-                print(
-                    f"ERROR: checkpoint helper install failed:\n  {result.stderr.strip()}\n"
-                    f"  Manual fix: sudo cp {helper_bin} /usr/local/bin/ && "
-                    f"sudo chmod u+s /usr/local/bin/nitrobox-checkpoint-helper"
-                )
-                ok = False
-
-    # ---- CRIU binary (install next to helper) --------------------------------
-    criu_bin = vendor_dir / "criu"
-    criu_libs = vendor_dir / "criu-libs"
-    system_criu = Path("/usr/local/bin/criu")
-    if not criu_bin.exists():
-        print("WARN: CRIU binary not found (checkpoint/restore unavailable)")
-    else:
-        vendor_hash = _sha256(criu_bin)
-        system_hash = _sha256(system_criu) if system_criu.exists() else None
-        if system_hash == vendor_hash:
-            print("OK: CRIU binary installed")
-        else:
-            action = "Updating" if system_hash else "Installing"
-            print(f"{action} CRIU binary via Docker...")
-            bind_args = ["-v", f"{criu_bin}:/tmp/criu:ro"]
-            copy_cmd = "cp /tmp/criu /host-bin/criu && chmod +x /host-bin/criu"
-            if criu_libs.is_dir():
-                bind_args.extend(["-v", f"{criu_libs}:/tmp/criu-libs:ro"])
-                copy_cmd += " && cp -r /tmp/criu-libs /host-bin/"
-            result = subprocess.run(
-                [docker, "run", "--rm",
-                 "-v", "/usr/local/bin:/host-bin"] + bind_args +
-                ["alpine", "sh", "-c", copy_cmd],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                print("OK: CRIU binary installed")
-            else:
-                print(f"WARN: CRIU install failed: {result.stderr.strip()[:200]}")
-
-    # ---- checks (detect only, no action) ---------------------------------
+    # ---- system checks (no Docker needed) -----------------------------------
     has_newuidmap = shutil.which("newuidmap") is not None
     has_subuid = False
     try:
@@ -443,7 +298,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
         sys.exit(1)
     elif has_subuid:
         print("OK: subuid/subgid configured (multi-UID mapping)")
-    elif not has_subuid:
+    else:
         print(
             f"WARN: no /etc/subuid entry for {user}.\n"
             f"  Fix: echo '{user}:100000:65536' | sudo tee -a /etc/subuid /etc/subgid"
@@ -462,6 +317,18 @@ def cmd_setup(args: argparse.Namespace) -> None:
             "  Fix: sudo apt-get install -y passt"
         )
 
+    # ---- containers-registries.conf (needed for short-name image pulls) ----
+    registries_conf = Path.home() / ".config" / "containers" / "registries.conf"
+    if registries_conf.exists():
+        print("OK: containers-registries.conf exists")
+    else:
+        registries_conf.parent.mkdir(parents=True, exist_ok=True)
+        registries_conf.write_text(
+            '# Added by nitrobox setup — resolve short image names via Docker Hub\n'
+            'unqualified-search-registries = ["docker.io"]\n'
+        )
+        print("OK: created containers-registries.conf (docker.io)")
+
     import platform
     kver = platform.release().split("-")[0]
     major, minor = (int(x) for x in kver.split(".")[:2])
@@ -469,6 +336,138 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(f"OK: kernel {kver} (>= 5.11, rootless overlayfs supported)")
     else:
         print(f"WARN: kernel {kver} (< 5.11, rootless overlayfs may not work)")
+
+    # ---- Docker-dependent setup -------------------------------------------
+    docker = shutil.which("docker")
+    if not docker:
+        print(
+            "\nWARN: Docker not found — skipping privileged setup steps.\n"
+            "Configure manually with sudo if needed:\n"
+            f"  sudo mkdir -p {cgroup_dir} && "
+            f"sudo chown {uid}:{gid} {cgroup_dir} && "
+            f"echo '+cpu +memory +pids +io +cpuset' | "
+            f"sudo tee {cgroup_dir}/cgroup.subtree_control"
+        )
+        criu_bin = vendor_dir / "criu"
+        if criu_bin.exists():
+            print(
+                f"  sudo setcap cap_checkpoint_restore,cap_sys_ptrace,cap_sys_admin+eip {criu_bin}"
+            )
+    else:
+        # ---- cgroup v2 check ------------------------------------------------
+        if not Path("/sys/fs/cgroup/cgroup.controllers").exists():
+            print("SKIP: cgroup v2 not available on this system.")
+        else:
+            # ---- cgroup delegation -----------------------------------------------
+            cg_path = Path(cgroup_dir)
+            cg_procs = cg_path / "cgroup.procs"
+            cgroup_ok = (
+                cg_path.exists()
+                and os.access(cg_path, os.W_OK)
+                and cg_procs.exists()
+                and os.access(str(cg_procs), os.W_OK)
+            )
+            if cgroup_ok:
+                print(f"OK: cgroup delegation already configured ({cgroup_dir})")
+            else:
+                if cg_path.exists() and not os.access(str(cg_procs), os.W_OK):
+                    print(f"WARN: {cgroup_dir} exists but cgroup.procs is not writable, re-configuring...")
+                print("Setting up cgroup delegation via Docker...")
+                result = subprocess.run(
+                    [
+                        docker, "run", "--rm",
+                        "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw",
+                        "alpine", "sh", "-c",
+                        f"mkdir -p {cgroup_dir} && "
+                        f"echo '+cpu +memory +pids +io +cpuset' > "
+                        f"{cgroup_dir}/cgroup.subtree_control && "
+                        f"chown {uid}:{gid} {cgroup_dir} && "
+                        f"chown {uid}:{gid} {cgroup_dir}/cgroup.procs && "
+                        f"chown {uid}:{gid} {cgroup_dir}/cgroup.subtree_control && "
+                        f"chown {uid}:{gid} /sys/fs/cgroup/cgroup.procs",
+                    ],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    print(f"OK: cgroup delegation configured ({cgroup_dir})")
+                else:
+                    print(
+                        f"ERROR: Docker cgroup setup failed:\n  {result.stderr.strip()}\n"
+                        f"  Manual fix: sudo mkdir -p {cgroup_dir} && "
+                        f"sudo chown {uid}:{gid} {cgroup_dir}"
+                    )
+                    ok = False
+
+        # ---- checkpoint helper (setuid) ----------------------------------------
+        helper_bin = vendor_dir / "nitrobox-checkpoint-helper"
+        system_helper = Path("/usr/local/bin/nitrobox-checkpoint-helper")
+        if not helper_bin.exists():
+            print("WARN: checkpoint helper binary not found in vendor dir")
+        else:
+            vendor_hash = _sha256(helper_bin)
+            system_hash = _sha256(system_helper) if system_helper.exists() else None
+            has_setuid = system_helper.exists() and bool(system_helper.stat().st_mode & 0o4000)
+            if system_hash == vendor_hash and has_setuid:
+                print("OK: checkpoint helper installed (setuid)")
+            else:
+                if system_hash is None:
+                    action = "Installing"
+                elif system_hash != vendor_hash:
+                    action = "Updating"
+                else:
+                    action = "Re-installing"  # exists but missing setuid
+                print(f"{action} checkpoint helper (setuid) via Docker...")
+                result = subprocess.run(
+                    [
+                        docker, "run", "--rm",
+                        "-v", f"{helper_bin}:/tmp/helper:ro",
+                        "-v", "/usr/local/bin:/host-bin",
+                        "alpine", "sh", "-c",
+                        "cp /tmp/helper /host-bin/nitrobox-checkpoint-helper && "
+                        "chown root:root /host-bin/nitrobox-checkpoint-helper && "
+                        "chmod u+s /host-bin/nitrobox-checkpoint-helper",
+                    ],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    print("OK: checkpoint helper installed (setuid)")
+                else:
+                    print(
+                        f"ERROR: checkpoint helper install failed:\n  {result.stderr.strip()}\n"
+                        f"  Manual fix: sudo cp {helper_bin} /usr/local/bin/ && "
+                        f"sudo chmod u+s /usr/local/bin/nitrobox-checkpoint-helper"
+                    )
+                    ok = False
+
+        # ---- CRIU binary (install next to helper) --------------------------------
+        criu_bin = vendor_dir / "criu"
+        criu_libs = vendor_dir / "criu-libs"
+        system_criu = Path("/usr/local/bin/criu")
+        if not criu_bin.exists():
+            print("WARN: CRIU binary not found (checkpoint/restore unavailable)")
+        else:
+            vendor_hash = _sha256(criu_bin)
+            system_hash = _sha256(system_criu) if system_criu.exists() else None
+            if system_hash == vendor_hash:
+                print("OK: CRIU binary installed")
+            else:
+                action = "Updating" if system_hash else "Installing"
+                print(f"{action} CRIU binary via Docker...")
+                bind_args = ["-v", f"{criu_bin}:/tmp/criu:ro"]
+                copy_cmd = "cp /tmp/criu /host-bin/criu && chmod +x /host-bin/criu"
+                if criu_libs.is_dir():
+                    bind_args.extend(["-v", f"{criu_libs}:/tmp/criu-libs:ro"])
+                    copy_cmd += " && cp -r /tmp/criu-libs /host-bin/"
+                result = subprocess.run(
+                    [docker, "run", "--rm",
+                     "-v", "/usr/local/bin:/host-bin"] + bind_args +
+                    ["alpine", "sh", "-c", copy_cmd],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    print("OK: CRIU binary installed")
+                else:
+                    print(f"WARN: CRIU install failed: {result.stderr.strip()[:200]}")
 
     # ---- layer cache warmup from Docker -----------------------------------
     _warmup_layer_cache(docker)
