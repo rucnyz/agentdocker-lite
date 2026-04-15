@@ -355,18 +355,12 @@ def cmd_setup(args: argparse.Namespace) -> None:
     else:
         print(f"WARN: kernel {kver} (< 5.11, rootless overlayfs may not work)")
 
-    # ---- BuildKit daemon (for concurrent image builds) ---------------------
+    # ---- BuildKit daemon (embedded in nitrobox-core) -----------------------
     try:
         from nitrobox.image.buildkit import BuildKitManager
         bk = BuildKitManager.get()
         bk.ensure_running()
-        print("OK: buildkitd running")
-    except FileNotFoundError:
-        print(
-            "FAIL: buildkitd not found — required for image builds.\n"
-            "  The buildkitd binary should be bundled in the nitrobox package."
-        )
-        sys.exit(1)
+        print("OK: embedded buildkitd running")
     except Exception as e:
         print(f"WARN: buildkitd failed to start: {e}")
 

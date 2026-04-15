@@ -1,9 +1,8 @@
 """BuildKit-based image building with in-memory concurrent cache.
 
-Manages a rootless buildkitd subprocess and provides build/layer APIs
-for Dockerfile builds. BuildKit's in-memory content-addressable cache
-enables true concurrent builds (~0.5s per cache-hit build, even with
-16+ concurrent builds).
+Manages an embedded buildkitd subprocess (via rootlesskit userns)
+and communicates via a JSON-over-Unix-socket handler. All build,
+pull, and layer resolution happens in-process on the server side.
 """
 
 from __future__ import annotations
@@ -11,9 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
+import signal
+import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -21,17 +22,14 @@ logger = logging.getLogger(__name__)
 _manager: BuildKitManager | None = None
 _lock = threading.Lock()
 
-# Cache: image_name → list of layer fs/ paths (set during build)
+# Cache: image_name → list of layer fs/ paths
 _buildkit_layer_cache: dict[str, list[str]] = {}
 # Cache: image_name → OCI config dict
 _buildkit_config_cache: dict[str, dict] = {}
 
 
 def get_buildkit_layers(image_name: str) -> list[str] | None:
-    """Look up cached BuildKit layer paths for an image.
-
-    Returns None if the image was not built via BuildKit.
-    """
+    """Look up cached BuildKit layer paths for an image."""
     return _buildkit_layer_cache.get(image_name)
 
 
@@ -41,11 +39,11 @@ def get_buildkit_config(image_name: str) -> dict | None:
 
 
 class BuildKitManager:
-    """Singleton manager for buildkitd lifecycle and build operations."""
+    """Singleton manager for embedded buildkitd lifecycle."""
 
     def __init__(self):
-        self._socket_path: str | None = None
-        self._snapshot_root: str | None = None
+        self._handler_path: str | None = None
+        self._server_proc: subprocess.Popen | None = None
         self._root_dir = str(Path.home() / ".local/share/nitrobox/buildkit")
 
     @classmethod
@@ -63,219 +61,179 @@ class BuildKitManager:
         from nitrobox._gobin import gobin
         return gobin()
 
-    def _buildkitd_bin(self) -> str:
-        """Find buildkitd binary."""
-        # Check vendored location first
-        vendor = Path(__file__).parent.parent / "_vendor" / "buildkitd"
-        if vendor.exists() and os.access(vendor, os.X_OK):
-            return str(vendor)
-        # Check PATH
-        path = shutil.which("buildkitd")
-        if path:
-            return path
-        raise FileNotFoundError(
-            "buildkitd not found. Install BuildKit or place the binary "
-            "at src/nitrobox/_vendor/buildkitd"
-        )
-
     def ensure_running(self) -> str:
-        """Start buildkitd if not running, return socket path."""
-        if self._socket_path:
-            return self._socket_path
+        """Start embedded buildkitd if not running, return handler socket path."""
+        if self._handler_path and self._is_socket_alive():
+            return self._handler_path
 
-        bin_path = self._gobin()
-        buildkitd = self._buildkitd_bin()
-
-        # Ensure rootlesskit is on PATH
-        env = os.environ.copy()
-        gopath = subprocess.run(
-            ["go", "env", "GOPATH"], capture_output=True, text=True
-        ).stdout.strip()
-        if gopath:
-            env["PATH"] = f"{gopath}/bin:{env.get('PATH', '')}"
-
-        req = json.dumps({
-            "buildkitd_bin": buildkitd,
-            "root_dir": self._root_dir,
-        }).encode()
-
-        result = subprocess.run(
-            [bin_path, "buildkit-start"],
-            input=req, capture_output=True, env=env, timeout=60,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to start buildkitd: {result.stderr.decode()[:500]}"
-            )
-
-        resp = json.loads(result.stdout)
-        self._socket_path = resp["socket_path"]
-        self._snapshot_root = resp["snapshot_root"]
-        logger.info("buildkitd running at %s", self._socket_path)
-        return self._socket_path
-
-    def pull(self, image: str) -> dict:
-        """Pull a pre-built image via BuildKit LLB.
-
-        Uses BuildKit's native image source (``llb.Image()``) to pull
-        the image into the snapshot store. No Dockerfile needed.
-        Returns the same dict as build().
-        """
-        socket = self.ensure_running()
-        bin_path = self._gobin()
-
-        env = os.environ.copy()
-        gopath = subprocess.run(
-            ["go", "env", "GOPATH"], capture_output=True, text=True
-        ).stdout.strip()
-        if gopath:
-            env["PATH"] = f"{gopath}/bin:{env.get('PATH', '')}"
-
-        req = json.dumps({
-            "socket_path": socket,
-            "root_dir": self._root_dir,
-            "image_ref": image,
-        }).encode()
-
-        result = subprocess.run(
-            [bin_path, "buildkit-pull"],
-            input=req, capture_output=True, env=env, timeout=600,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"BuildKit pull failed for {image}: {result.stderr.decode()[-1000:]}"
-            )
-
-        resp = json.loads(result.stdout)
-
-        if resp.get("layer_paths"):
-            _buildkit_layer_cache[image] = resp["layer_paths"]
-        if resp.get("manifest_digest"):
+        # Check if server is already running (from a previous Python session)
+        server_json = Path(self._root_dir) / "server.json"
+        if server_json.exists():
             try:
-                cfg = self.read_image_config(resp["manifest_digest"])
-                _buildkit_config_cache[image] = cfg
+                info = json.loads(server_json.read_text())
+                hp = info.get("handler_path", "")
+                if hp and os.path.exists(hp):
+                    self._handler_path = hp
+                    if self._is_socket_alive():
+                        logger.info("Reusing existing buildkitd at %s", hp)
+                        return self._handler_path
             except Exception:
                 pass
 
-        return resp
+        # Start the embedded server
+        bin_path = self._gobin()
+        ready_path = Path(self._root_dir) / "ready"
+        ready_path.unlink(missing_ok=True)
+
+        req = json.dumps({"root_dir": self._root_dir}).encode()
+
+        self._server_proc = subprocess.Popen(
+            [bin_path, "buildkit-serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Send config via stdin (consumed by CLI before rootlesskit re-exec)
+        self._server_proc.stdin.write(req + b"\n")
+        self._server_proc.stdin.flush()
+        # Don't close stdin — keep pipe open so server stays alive
+
+        # Wait for ready
+        for _ in range(60):
+            if ready_path.exists():
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError(
+                "buildkitd failed to start within 30s. "
+                "Check server logs at " + self._root_dir
+            )
+
+        # Read server info
+        info = json.loads(server_json.read_text())
+        self._handler_path = info["handler_path"]
+        logger.info("Embedded buildkitd started at %s", self._handler_path)
+        return self._handler_path
+
+    def _is_socket_alive(self) -> bool:
+        """Check if the handler socket is connectable."""
+        if not self._handler_path or not os.path.exists(self._handler_path):
+            return False
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(self._handler_path)
+            s.close()
+            return True
+        except Exception:
+            return False
+
+    def _send_request(self, req: dict, timeout: int = 600) -> dict:
+        """Send a JSON request to the handler socket and return response."""
+        handler = self.ensure_running()
+        docker_config = str(Path.home() / ".docker")
+        req["docker_config"] = docker_config
+
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(handler)
+        s.sendall(json.dumps(req).encode() + b"\n")
+        s.shutdown(socket.SHUT_WR)
+
+        resp = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                resp += chunk
+            except socket.timeout:
+                break
+        s.close()
+
+        result = json.loads(resp)
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        return result
 
     def build(self, context: str, dockerfile: str, tag: str) -> dict:
-        """Build a Dockerfile via BuildKit.
+        """Build a Dockerfile via embedded BuildKit.
 
-        Returns dict with keys: manifest_digest, config_digest, layer_paths.
+        Returns dict with keys: manifest_digest, layer_paths.
         """
-        socket = self.ensure_running()
-        bin_path = self._gobin()
-
-        # Ensure rootlesskit is on PATH
-        env = os.environ.copy()
-        gopath = subprocess.run(
-            ["go", "env", "GOPATH"], capture_output=True, text=True
-        ).stdout.strip()
-        if gopath:
-            env["PATH"] = f"{gopath}/bin:{env.get('PATH', '')}"
-
-        req = json.dumps({
-            "socket_path": socket,
-            "root_dir": self._root_dir,
+        result = self._send_request({
+            "action": "build",
             "dockerfile": dockerfile,
             "context": context,
             "tag": tag,
-        }).encode()
+        })
 
-        result = subprocess.run(
-            [bin_path, "buildkit-build"],
-            input=req, capture_output=True, env=env, timeout=600,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.decode()
-            if "invalid argument" in stderr and ("subuid" in stderr or "subgid" in stderr or "Lchown" in stderr):
-                raise RuntimeError(
-                    f"BuildKit build failed for {tag}: UID/GID mapping range too small.\n"
-                    f"The image contains files with UIDs that exceed your "
-                    f"/etc/subuid range.\n"
-                    f"Fix: sudo sed -i 's/{os.getlogin()}:[0-9]*:[0-9]*/"
-                    f"{os.getlogin()}:100000:1000000/' /etc/subuid /etc/subgid\n"
-                    f"Then restart buildkitd: nitrobox buildkit-stop\n\n"
-                    f"Original error: {stderr[-500:]}"
-                )
-            raise RuntimeError(
-                f"BuildKit build failed for {tag}: {stderr[-1000:]}"
-            )
+        # Cache results
+        if result.get("layer_paths"):
+            _buildkit_layer_cache[tag] = result["layer_paths"]
+        if result.get("manifest_digest"):
+            self._cache_config(tag, result["manifest_digest"])
 
-        resp = json.loads(result.stdout)
+        return result
 
-        # Cache layer paths and config for later lookup
-        if resp.get("layer_paths"):
-            _buildkit_layer_cache[tag] = resp["layer_paths"]
-        if resp.get("manifest_digest"):
-            try:
-                cfg = self.read_image_config(resp["manifest_digest"])
-                _buildkit_config_cache[tag] = cfg
-            except Exception:
-                pass
+    def pull(self, image: str) -> dict:
+        """Pull a pre-built image via BuildKit."""
+        result = self._send_request({
+            "action": "pull",
+            "image_ref": image,
+        })
 
-        return resp
+        if result.get("layer_paths"):
+            _buildkit_layer_cache[image] = result["layer_paths"]
+        if result.get("manifest_digest"):
+            self._cache_config(image, result["manifest_digest"])
 
-    def get_layer_paths(self, manifest_digest: str) -> list[str]:
-        """Get layer fs/ paths from a previous build result."""
-        bin_path = self._gobin()
-        req = json.dumps({
-            "root_dir": self._root_dir,
-            "manifest_digest": manifest_digest,
-        }).encode()
-
-        result = subprocess.run(
-            [bin_path, "buildkit-layers"],
-            input=req, capture_output=True, timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to get layers: {result.stderr.decode()[:300]}"
-            )
-
-        return json.loads(result.stdout)["layers"]
+        return result
 
     def read_image_config(self, manifest_digest: str) -> dict:
-        """Read OCI image config from BuildKit content store."""
-        content_dir = Path(self._root_dir) / "root/runc-overlayfs/content/blobs/sha256"
-        digest = manifest_digest.removeprefix("sha256:")
+        """Read OCI image config via handler."""
+        result = self._send_request({
+            "action": "config",
+            "digest": manifest_digest,
+        }, timeout=10)
+        if result.get("config"):
+            return json.loads(result["config"]) if isinstance(result["config"], str) else result["config"]
+        return {}
 
-        # Read manifest
-        manifest_path = content_dir / digest
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-
-        # Read config
-        config_digest = manifest["config"]["digest"].removeprefix("sha256:")
-        config_path = content_dir / config_digest
-        with open(config_path) as f:
-            return json.load(f)
+    def _cache_config(self, tag: str, manifest_digest: str):
+        """Cache OCI config for an image tag."""
+        try:
+            cfg = self.read_image_config(manifest_digest)
+            _buildkit_config_cache[tag] = cfg
+        except Exception:
+            pass
 
     def stop(self):
-        """Stop the managed buildkitd."""
-        bin_path = self._gobin()
-        subprocess.run(
-            [bin_path, "buildkit-stop"],
-            capture_output=True, timeout=10,
-        )
-        # Also kill any leftover rootlesskit/buildkitd processes
-        import signal
-        pid_path = Path(self._root_dir) / "buildkitd.pid"
-        if pid_path.exists():
+        """Stop the embedded buildkitd."""
+        if self._server_proc and self._server_proc.poll() is None:
+            self._server_proc.terminate()
             try:
-                pid = int(pid_path.read_text().strip())
+                self._server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._server_proc.kill()
+            self._server_proc = None
+
+        # Also try killing by PID from rootlesskit state
+        rk_pid = Path(self._root_dir) / "rootlesskit" / "child_pid"
+        if rk_pid.exists():
+            try:
+                pid = int(rk_pid.read_text().strip())
                 os.kill(pid, signal.SIGTERM)
             except (ValueError, ProcessLookupError, OSError):
                 pass
-            pid_path.unlink(missing_ok=True)
-        self._socket_path = None
+
+        self._handler_path = None
 
     @property
     def available(self) -> bool:
-        """Check if BuildKit backend is available."""
+        """Check if BuildKit backend is available (nitrobox-core exists)."""
         try:
-            self._buildkitd_bin()
+            self._gobin()
             return True
-        except FileNotFoundError:
+        except Exception:
             return False
