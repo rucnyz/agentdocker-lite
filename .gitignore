@@ -15,3 +15,7 @@ target/
 .envrc
 jobs/
 .env
+
+# Built by build.rs / `make dev` — never commit (~32MB Go binary)
+src/nitrobox/_vendor/nitrobox-core
+go/nitrobox-core

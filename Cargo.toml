@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Rust core for nitrobox: Linux namespace sandbox syscall interface"
+build = "build.rs"
 
 [lib]
 name = "nitrobox_core"

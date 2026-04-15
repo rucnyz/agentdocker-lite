@@ -51,4 +51,8 @@ module-name = "nitrobox._core"
 features = ["pyo3/extension-module"]
 include = [
     { path = "src/nitrobox/_vendor/**", format = "sdist" },
+    # Ship Go source + build script so sdist installs can rebuild nitrobox-core.
+    { path = "go/**", format = "sdist" },
+    { path = "build.rs", format = "sdist" },
+    { path = "Makefile", format = "sdist" },
 ]
