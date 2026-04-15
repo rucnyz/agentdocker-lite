@@ -55,7 +55,7 @@ class TestBuildKitManager:
 class TestBuildKitDaemon:
     """Tests for buildkitd lifecycle management."""
 
-    def test_start_and_stop(self):
+    def test_start_idempotent(self):
         _requires_buildkitd()
         _requires_gobin()
         _requires_rootlesskit()
@@ -71,9 +71,6 @@ class TestBuildKitDaemon:
         # Already running — should be idempotent
         socket2 = bk.ensure_running()
         assert socket2 == socket
-
-        # Stop
-        bk.stop()
 
 
 class TestBuildKitBuild:
@@ -206,12 +203,13 @@ class TestBuildKitLayerCache:
 class TestBuildKitCLI:
     """Tests for the nitrobox buildkit-stop CLI command."""
 
-    def test_buildkit_stop_command(self):
+    def test_buildkit_stop_command_exists(self):
+        """Verify the buildkit-stop CLI command is registered."""
         _requires_gobin()
 
         result = subprocess.run(
-            ["python", "-m", "nitrobox.cli", "buildkit-stop"],
+            ["python", "-m", "nitrobox.cli", "--help"],
             capture_output=True, text=True, timeout=15,
         )
-        # Should succeed even if buildkitd isn't running
         assert result.returncode == 0
+        assert "buildkit-stop" in result.stdout

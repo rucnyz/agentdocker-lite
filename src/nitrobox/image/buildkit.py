@@ -214,6 +214,16 @@ class BuildKitManager:
             [bin_path, "buildkit-stop"],
             capture_output=True, timeout=10,
         )
+        # Also kill any leftover rootlesskit/buildkitd processes
+        import signal
+        pid_path = Path(self._root_dir) / "buildkitd.pid"
+        if pid_path.exists():
+            try:
+                pid = int(pid_path.read_text().strip())
+                os.kill(pid, signal.SIGTERM)
+            except (ValueError, ProcessLookupError, OSError):
+                pass
+            pid_path.unlink(missing_ok=True)
         self._socket_path = None
 
     @property

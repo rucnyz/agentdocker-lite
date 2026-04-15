@@ -2616,35 +2616,28 @@ class TestSharedNetworkCleanup:
 # ------------------------------------------------------------------ #
 
 
-class TestBuildahBuild:
-    """Test that buildah build via nitrobox-core works end-to-end."""
+class TestBuildKitBuild:
+    """Test that BuildKit build via buildkitd works end-to-end."""
 
     @pytest.fixture(autouse=True)
     def _skip_if_missing(self):
-        """Skip if nitrobox-core or pasta not available."""
-        import shutil
-        core = os.environ.get("NITROBOX_CORE_BIN", "")
-        if not core:
-            candidate = Path(__file__).resolve().parent.parent / "go" / "nitrobox-core"
-            if not candidate.is_file():
-                pytest.skip("nitrobox-core not found")
-        if not shutil.which("pasta"):
-            vendor_pasta = Path(__file__).resolve().parent.parent / "src" / "nitrobox" / "_vendor" / "pasta"
-            if not vendor_pasta.is_file():
-                pytest.skip("pasta not found")
-        if not os.environ.get("XDG_RUNTIME_DIR"):
-            pytest.skip("XDG_RUNTIME_DIR not set")
+        """Skip if buildkitd not available."""
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        if not bk.available:
+            pytest.skip("buildkitd not found")
 
     def test_build_from_alpine(self, tmp_path):
-        """Build a simple Dockerfile from alpine and verify it's in the store."""
+        """Build a simple Dockerfile from alpine and verify layers exist."""
+        from nitrobox.image.buildkit import BuildKitManager, get_buildkit_layers
         ctx = tmp_path / "ctx"
         ctx.mkdir()
         (ctx / "Dockerfile").write_text(
-            "FROM alpine:latest\nRUN echo buildah-test > /tmp/marker.txt\n"
+            "FROM alpine:latest\nRUN echo buildkit-test > /tmp/marker.txt\n"
         )
-        proj = ComposeProject._buildah_build(str(ctx), "Dockerfile", "test-buildah-ci:latest")
-
-        from nitrobox.image.layers import _get_store_layers
-        layers = _get_store_layers("localhost/test-buildah-ci:latest")
-        assert layers is not None, "Built image not found in containers/storage"
+        bk = BuildKitManager.get()
+        result = bk.build(str(ctx), "Dockerfile", "test-buildkit-ci:latest")
+        assert result.get("layer_paths")
+        layers = get_buildkit_layers("test-buildkit-ci:latest")
+        assert layers is not None, "Built image not found in BuildKit cache"
         assert len(layers) >= 1
