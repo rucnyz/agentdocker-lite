@@ -3,6 +3,7 @@ name: Publish to PyPI
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,32 +13,56 @@ env:
 
 jobs:
   build-wheel:
-    name: Build wheel
+    name: Build wheel (${{ matrix.target }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v6
 
-      # Build Go binary and place in _vendor/
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      - run: |
+
+      # Cross-compiler for aarch64 — host is x86_64, we cross-compile so
+      # we don't pay the QEMU emulation cost.
+      - name: Install aarch64 toolchain
+        if: matrix.target == 'aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build nitrobox-core (Go binary, ${{ matrix.target }})
+        run: |
           cd go
+          if [ "${{ matrix.target }}" = "aarch64" ]; then
+            export GOOS=linux GOARCH=arm64
+            export CC=aarch64-linux-gnu-gcc
+          fi
           CGO_ENABLED=1 go build \
             -tags "exclude_graphdriver_btrfs containers_image_openpgp" \
+            -trimpath -ldflags="-s -w" \
             -o ../src/nitrobox/_vendor/nitrobox-core \
             ./cmd/nitrobox-core/
           chmod +x ../src/nitrobox/_vendor/nitrobox-core
+          file ../src/nitrobox/_vendor/nitrobox-core
 
-      # Build wheel with maturin (includes Rust _core + Go binary in _vendor/)
+      # Build wheel via maturin. NITROBOX_SKIP_GO_BUILD=1 tells build.rs not
+      # to re-run `go build` inside the manylinux container (which doesn't
+      # have Go anyway) — we already placed the prebuilt binary above.
       - uses: PyO3/maturin-action@v1
+        env:
+          NITROBOX_SKIP_GO_BUILD: "1"
         with:
-          target: x86_64
+          target: ${{ matrix.target }}
           args: --release --out dist -i python3.12 python3.13
           manylinux: auto
+
       - uses: actions/upload-artifact@v7
         with:
-          name: wheel-x86_64
+          name: wheel-${{ matrix.target }}
           path: dist/
 
   build-sdist:
