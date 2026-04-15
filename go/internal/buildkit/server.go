@@ -72,8 +72,13 @@ func (s *Server) Start() (string, error) {
 		return "", fmt.Errorf("mkdir root: %w", err)
 	}
 
-	// Socket path
-	socketDir := fmt.Sprintf("/tmp/nitrobox-buildkitd-%d", os.Getuid())
+	// Socket path — use outer UID (passed via env before userns re-exec)
+	// so the socket is accessible from outside the user namespace.
+	outerUID := os.Getenv("_NITROBOX_OUTER_UID")
+	if outerUID == "" {
+		outerUID = fmt.Sprintf("%d", os.Getuid())
+	}
+	socketDir := fmt.Sprintf("/tmp/nitrobox-buildkitd-%s", outerUID)
 	os.MkdirAll(socketDir, 0o700)
 	s.socketPath = filepath.Join(socketDir, "buildkitd.sock")
 	os.Remove(s.socketPath)

@@ -169,6 +169,11 @@ func main() {
 				os.Setenv("_NITROBOX_BUILDKIT_CONFIG", string(reqJSON))
 			}
 
+			// Save outer UID before userns re-exec (socket path needs it)
+			if os.Getenv("_NITROBOX_OUTER_UID") == "" {
+				os.Setenv("_NITROBOX_OUTER_UID", fmt.Sprintf("%d", os.Getuid()))
+			}
+
 			// Re-exec in user namespace (rootless buildkitd needs mapped root)
 			unshare.MaybeReexecUsingUserNamespace(false)
 			os.Unsetenv("_NITROBOX_BUILDKIT_CONFIG")
