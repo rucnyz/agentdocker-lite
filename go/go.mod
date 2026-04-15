@@ -7,6 +7,7 @@ require (
 	github.com/docker/cli v29.3.1+incompatible
 	github.com/moby/buildkit v0.26.3
 	github.com/spf13/cobra v1.10.2
+	go.etcd.io/bbolt v1.4.3
 	go.podman.io/image/v5 v5.39.2
 	go.podman.io/storage v1.62.0
 	golang.org/x/sync v0.19.0
@@ -132,7 +133,6 @@ require (
 	github.com/vbauerster/mpb/v8 v8.10.2 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.63.0 // indirect

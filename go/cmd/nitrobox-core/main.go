@@ -227,11 +227,40 @@ func main() {
 	})
 
 	rootCmd.AddCommand(&cobra.Command{
+		Use:   "buildkit-layers",
+		Short: "Get layer paths from BuildKit snapshots",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				RootDir        string `json:"root_dir"`
+				ManifestDigest string `json:"manifest_digest"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			rootDir := req.RootDir
+			if rootDir == "" {
+				rootDir = nbxbuildkit.DefaultRootDir()
+			}
+			// Strip "sha256:" prefix if present
+			digest := req.ManifestDigest
+			if len(digest) > 7 && digest[:7] == "sha256:" {
+				digest = digest[7:]
+			}
+			paths, err := nbxbuildkit.ImageLayers(rootDir, digest)
+			if err != nil {
+				return err
+			}
+			return writeJSON(map[string]any{"layers": paths})
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "buildkit-build",
 		Short: "Build a Dockerfile via BuildKit",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var req struct {
 				SocketPath string `json:"socket_path"`
+				RootDir    string `json:"root_dir"`
 				Dockerfile string `json:"dockerfile"`
 				Context    string `json:"context"`
 				Tag        string `json:"tag"`
@@ -239,13 +268,17 @@ func main() {
 			if err := readJSON(&req); err != nil {
 				return err
 			}
-			digest, err := nbxbuildkit.BuildImage(
-				req.SocketPath, req.Dockerfile, req.Context, req.Tag,
+			rootDir := req.RootDir
+			if rootDir == "" {
+				rootDir = nbxbuildkit.DefaultRootDir()
+			}
+			result, err := nbxbuildkit.BuildImage(
+				req.SocketPath, rootDir, req.Dockerfile, req.Context, req.Tag,
 			)
 			if err != nil {
 				return err
 			}
-			return writeJSON(map[string]string{"digest": digest})
+			return writeJSON(result)
 		},
 	})
 
