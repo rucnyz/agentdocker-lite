@@ -139,7 +139,11 @@ class TestParseCompose:
                 build: ./app
         """))
         services, _ = _parse_compose(compose, {})
-        assert services["app"].build == {"context": "./app"}
+        # Relative build contexts are resolved against the compose file's
+        # directory (docker-compose semantics), so we get an absolute path
+        # ending in "/app", not the literal "./app".
+        expected = str((tmp_path / "app").resolve())
+        assert services["app"].build == {"context": expected}
 
     def test_build_object(self, tmp_path):
         compose = tmp_path / "docker-compose.yml"
@@ -152,7 +156,8 @@ class TestParseCompose:
                   target: production
         """))
         services, _ = _parse_compose(compose, {})
-        assert services["app"].build["context"] == "./app"
+        expected_ctx = str((tmp_path / "app").resolve())
+        assert services["app"].build["context"] == expected_ctx
         assert services["app"].build["dockerfile"] == "Dockerfile.prod"
         assert services["app"].build["target"] == "production"
 
