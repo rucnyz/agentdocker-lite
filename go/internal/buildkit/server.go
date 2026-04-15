@@ -114,15 +114,9 @@ func (s *Server) Start() (string, error) {
 	workerRoot := filepath.Join(s.rootDir, "runc-"+snName)
 	os.MkdirAll(workerRoot, 0o700)
 
-	logFile, _ := os.OpenFile(filepath.Join(s.rootDir, "init.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	log := func(msg string, args ...any) {
-		line := fmt.Sprintf("buildkit-init: "+msg+"\n", args...)
-		fmt.Fprint(os.Stderr, line)
-		if logFile != nil {
-			logFile.WriteString(line)
-		}
+		bklog.L.Infof(msg, args...)
 	}
-	defer func() { if logFile != nil { logFile.Close() } }()
 
 	// Network
 	log("setting up network providers...")
@@ -336,6 +330,9 @@ func (s *Server) Stop() {
 		s.listener.Close()
 	}
 	os.Remove(s.socketPath)
+	// Also remove handler socket
+	handlerPath := strings.TrimSuffix(s.socketPath, ".sock") + "-nbx.sock"
+	os.Remove(handlerPath)
 	s.started = false
 }
 

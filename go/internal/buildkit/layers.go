@@ -1,3 +1,4 @@
+// OCI types and utilities for manifest/config parsing and chain ID computation.
 package buildkit
 
 import (
@@ -5,47 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
-// ImageLayers returns the overlay diff directory paths for an image built by
-// BuildKit, ordered bottom-to-top (base layer first).
-//
-// manifestDigest is the SHA256 digest of the OCI manifest (with or without
-// "sha256:" prefix). This is returned by BuildImage.
-//
-// This function reads the content store (which is plain files, not locked by
-// buildkitd) and scans the snapshot directories to find layer paths.
-func ImageLayers(rootDir, manifestDigest string) ([]string, error) {
-	contentDir := filepath.Join(rootDir, "root", "runc-overlayfs", "content", "blobs", "sha256")
-	snapshotDir := filepath.Join(rootDir, "root", "runc-overlayfs", "snapshots", "snapshots")
-
-	manifestDigest = trimSHA256(manifestDigest)
-
-	// Step 1: Read manifest to get config digest.
-	manifest, err := readJSON[ociManifest](filepath.Join(contentDir, manifestDigest))
-	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
-	}
-
-	// Step 2: Read config to get diff IDs and OCI config.
-	configDigest := trimSHA256(manifest.Config.Digest)
-	config, err := readJSON[ociConfig](filepath.Join(contentDir, configDigest))
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-
-	// Step 3: Compute chain IDs from diff IDs.
-	chainIDs := computeChainIDs(config.RootFS.DiffIDs)
-
-	// Cannot read metadata.db while buildkitd is running (bbolt exclusive lock).
-	// Use BuildImage instead, which resolves layers during the build.
-	_ = snapshotDir
-	return nil, fmt.Errorf("use BuildImage instead — metadata.db is locked by buildkitd; chainIDs=%v", chainIDs)
-}
-
-// BuildResult contains the output of a BuildKit build.
+// BuildResult contains the output of a build or pull operation.
 type BuildResult struct {
 	ManifestDigest string   `json:"manifest_digest"`
 	ConfigDigest   string   `json:"config_digest"`
@@ -110,21 +74,8 @@ func computeChainIDs(diffIDs []string) []string {
 	return chainIDs
 }
 
-// ReadImageConfig reads the OCI image config from the BuildKit content store.
-func ReadImageConfig(rootDir, manifestDigest string) (*ociConfig, error) {
-	contentDir := filepath.Join(rootDir, "root", "runc-overlayfs", "content", "blobs", "sha256")
-	manifestDigest = trimSHA256(manifestDigest)
-
-	manifest, err := readJSON[ociManifest](filepath.Join(contentDir, manifestDigest))
-	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
-	}
-
-	configDigest := trimSHA256(manifest.Config.Digest)
-	config, err := readJSON[ociConfig](filepath.Join(contentDir, configDigest))
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-
-	return &config, nil
+// DefaultRootDir returns the default buildkitd root directory.
+func DefaultRootDir() string {
+	home, _ := os.UserHomeDir()
+	return home + "/.local/share/nitrobox/buildkit"
 }

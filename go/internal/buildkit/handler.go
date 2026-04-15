@@ -23,7 +23,6 @@ import (
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/bklog"
-	"github.com/containerd/containerd/v2/core/snapshots"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -103,8 +102,6 @@ func (s *Server) handleConn(conn net.Conn) {
 		resp = s.doPull(req)
 	case "config":
 		resp = s.doConfig(req)
-	case "walk":
-		resp = s.doWalk(req)
 	default:
 		resp = Response{Error: fmt.Sprintf("unknown action: %s", req.Action)}
 	}
@@ -279,18 +276,6 @@ func (s *Server) doConfig(req Request) Response {
 	return Response{
 		OK:     true,
 		Config: cfgJSON,
-	}
-}
-
-func (s *Server) doWalk(_ Request) Response {
-	var keys []string
-	s.snapshotter.Walk(context.Background(), func(_ context.Context, info snapshots.Info) error {
-		keys = append(keys, fmt.Sprintf("%s (kind=%v parent=%s)", info.Name, info.Kind, info.Parent))
-		return nil
-	})
-	return Response{
-		OK:         true,
-		LayerPaths: keys,
 	}
 }
 
