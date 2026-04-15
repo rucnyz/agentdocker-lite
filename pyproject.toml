@@ -51,6 +51,10 @@ module-name = "nitrobox._core"
 features = ["pyo3/extension-module"]
 include = [
     { path = "src/nitrobox/_vendor/**", format = "sdist" },
+    # nitrobox-core is built by build.rs and lives in .gitignore — explicitly
+    # include it in the wheel so installed packages can find it. (Maturin only
+    # auto-includes git-tracked files in wheels.)
+    { path = "src/nitrobox/_vendor/nitrobox-core", format = "wheel" },
     # Ship Go source + build script so sdist installs can rebuild nitrobox-core.
     { path = "go/**", format = "sdist" },
     { path = "build.rs", format = "sdist" },
