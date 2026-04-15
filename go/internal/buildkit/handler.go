@@ -28,12 +28,13 @@ import (
 
 // Request from Python.
 type Request struct {
-	Action     string `json:"action"`     // "build", "pull", "config"
-	Dockerfile string `json:"dockerfile"` // for build
-	Context    string `json:"context"`    // for build
-	Tag        string `json:"tag"`        // for build/pull
-	ImageRef   string `json:"image_ref"`  // for pull
-	Digest     string `json:"digest"`     // for config
+	Action       string `json:"action"`        // "build", "pull", "config"
+	Dockerfile   string `json:"dockerfile"`    // for build
+	Context      string `json:"context"`       // for build
+	Tag          string `json:"tag"`           // for build/pull
+	ImageRef     string `json:"image_ref"`     // for pull
+	Digest       string `json:"digest"`        // for config
+	DockerConfig string `json:"docker_config"` // path to Docker config dir (for auth)
 }
 
 // Response to Python.
@@ -62,7 +63,14 @@ func (s *Server) StartHandler() (string, error) {
 			if err != nil {
 				return // listener closed
 			}
-			go s.handleConn(conn)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "handler panic: %v\n", r)
+					}
+				}()
+				s.handleConn(conn)
+			}()
 		}
 	}()
 
@@ -101,6 +109,20 @@ func (s *Server) handleConn(conn net.Conn) {
 	json.NewEncoder(conn).Encode(resp)
 }
 
+func (s *Server) loadDockerConfig(dockerConfigDir string) authprovider.DockerAuthProviderConfig {
+	if dockerConfigDir != "" {
+		// Load from explicit path (passed from outside userns)
+		cfg, err := config.Load(dockerConfigDir)
+		if err == nil {
+			return authprovider.DockerAuthProviderConfig{ConfigFile: cfg}
+		}
+	}
+	// Fallback to default (DOCKER_CONFIG env or ~/.docker/)
+	return authprovider.DockerAuthProviderConfig{
+		ConfigFile: config.LoadDefaultConfigFile(os.Stderr),
+	}
+}
+
 func (s *Server) doBuild(req Request) Response {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -130,9 +152,7 @@ func (s *Server) doBuild(req Request) Response {
 			Attrs: map[string]string{"name": req.Tag, "push": "false"},
 		}},
 		Session: []session.Attachable{
-			authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
-				ConfigFile: config.LoadDefaultConfigFile(os.Stderr),
-			}),
+			authprovider.NewDockerAuthProvider(s.loadDockerConfig(req.DockerConfig)),
 		},
 	}
 
@@ -196,9 +216,7 @@ func (s *Server) doPull(req Request) Response {
 			Attrs: map[string]string{"name": req.ImageRef, "push": "false"},
 		}},
 		Session: []session.Attachable{
-			authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
-				ConfigFile: config.LoadDefaultConfigFile(os.Stderr),
-			}),
+			authprovider.NewDockerAuthProvider(s.loadDockerConfig(req.DockerConfig)),
 		},
 	}
 

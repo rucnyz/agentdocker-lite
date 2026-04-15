@@ -170,8 +170,12 @@ func (s *Server) Start() (string, error) {
 	}
 
 	go func() {
+		bklog.L.Infof("gRPC server starting on %s", s.socketPath)
 		if err := s.grpcServer.Serve(s.listener); err != nil {
-			bklog.L.Errorf("gRPC serve error: %v", err)
+			bklog.L.Errorf("gRPC serve FAILED: %v", err)
+			fmt.Fprintf(os.Stderr, "GRPC SERVE ERROR: %v\n", err)
+		} else {
+			bklog.L.Infof("gRPC server stopped cleanly")
 		}
 	}()
 
