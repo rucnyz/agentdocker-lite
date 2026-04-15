@@ -250,7 +250,8 @@ class CheckpointManager:
         # 4. Create new pipes for the restored process.
         signal_r, signal_w = os.pipe()
         if use_tty:
-            import pty as pty_mod, termios
+            import pty as pty_mod
+            import termios
             master_fd, slave_fd = pty_mod.openpty()
             attrs = termios.tcgetattr(master_fd)
             attrs[3] &= ~termios.ECHO

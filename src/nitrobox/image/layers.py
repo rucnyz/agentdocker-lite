@@ -138,7 +138,7 @@ def _containers_storage_pull(image_name: str) -> bool | str:
         return False
 
     outer_uid, sub_start, sub_count = subuid
-    outer_gid = os.getgid()
+    os.getgid()
 
     graph_root = _containers_storage_root()
     if graph_root is None:
@@ -305,7 +305,7 @@ def _rmtree_in_userns(path: Path) -> None:
     corrupting asyncio's event loop file descriptors.
     """
     from nitrobox._gobin import gobin
-    bin_path = gobin()
+    gobin()
 
     from nitrobox.config import detect_subuid_range
     subuid = detect_subuid_range()
@@ -410,7 +410,7 @@ def _get_image_digest(image: str) -> str | None:
 
     # Fallback: try Docker API (for images built by docker but not yet in our store)
     try:
-        from nitrobox.image.docker import get_client, ImageNotFoundError
+        from nitrobox.image.docker import get_client
         info = get_client().image_inspect(image)
         digest = info.get("Id", "")
         return digest.replace(":", "_")[:80] if digest else None

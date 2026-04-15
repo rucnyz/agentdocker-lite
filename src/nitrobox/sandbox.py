@@ -361,10 +361,12 @@ class Sandbox:
             from nitrobox._core import py_userns_preexec
             rootfs = str(self._rootfs)
             workdir = self._config.working_dir or "/"
-            preexec = lambda: py_userns_preexec(shell_pid, rootfs, workdir)
+            def preexec():
+                return py_userns_preexec(shell_pid, rootfs, workdir)
         else:
             from nitrobox._core import py_nsenter_preexec
-            preexec = lambda: py_nsenter_preexec(shell_pid)
+            def preexec():
+                return py_nsenter_preexec(shell_pid)
 
         defaults: dict[str, Any] = {
             "stdin": subprocess.PIPE,
@@ -1523,6 +1525,7 @@ class Sandbox:
                         return
                     except OSError:
                         time.sleep(0.1)
+            import threading
             threading.Thread(target=_deferred_rmdir, daemon=True).start()
 
     # -- rootless cgroup via delegation -------------------------------- #

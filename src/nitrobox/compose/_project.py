@@ -391,7 +391,6 @@ class ComposeProject:
 
         Layers shared with other images are kept (same as ``docker rmi``).
         """
-        from pathlib import Path
         import subprocess
 
         from nitrobox._gobin import gobin
@@ -472,7 +471,7 @@ class ComposeProject:
         """
         from nitrobox.docker_api import get_client
 
-        client = get_client()
+        get_client()
         project = self._project_name or self._compose_files[0].parent.name
 
         mapping: dict[str, str] = {}

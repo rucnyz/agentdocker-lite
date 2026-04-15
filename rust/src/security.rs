@@ -254,7 +254,12 @@ pub fn build_seccomp_bpf() -> Vec<u8> {
 /// (observed as ~2x slowdown on Python/interpreter inside nested QEMU VMs).
 /// Matches runc's behavior (see moby/moby issue #41389, runc #3390/#3588).
 pub fn apply_seccomp_filter() -> io::Result<()> {
+    // Constants from <linux/seccomp.h>:
+    const SECCOMP_SET_MODE_FILTER: libc::c_ulong = 1;
+    const SECCOMP_FILTER_FLAG_SPEC_ALLOW: libc::c_ulong = 4;
+
     let bpf_bytes = build_seccomp_bpf();
+
     let n_insns = bpf_bytes.len() / std::mem::size_of::<libc::sock_filter>();
 
     let prog = libc::sock_fprog {
@@ -267,11 +272,6 @@ pub fn apply_seccomp_filter() -> io::Result<()> {
 
     // Install BPF filter via seccomp(2) syscall (NOT prctl) so we can pass
     // SECCOMP_FILTER_FLAG_SPEC_ALLOW and avoid the implicit SSBD/STIBP cost.
-    // Constants from <linux/seccomp.h>:
-    //   SECCOMP_SET_MODE_FILTER   = 1
-    //   SECCOMP_FILTER_FLAG_SPEC_ALLOW = 4
-    const SECCOMP_SET_MODE_FILTER: libc::c_ulong = 1;
-    const SECCOMP_FILTER_FLAG_SPEC_ALLOW: libc::c_ulong = 4;
 
     let ret = unsafe {
         libc::syscall(

@@ -162,7 +162,7 @@ def _warmup_layer_cache(docker: str | None, *, min_group_size: int = 10) -> None
         return
 
     # Check if containers/storage already has images (skip if warm)
-    from nitrobox.image.layers import _containers_storage_root, _get_store_layers
+    from nitrobox.image.layers import _containers_storage_root
     store = _containers_storage_root()
     if store is not None:
         # Check if store already has overlay-images dir with content
@@ -243,10 +243,10 @@ def _warmup_layer_cache(docker: str | None, *, min_group_size: int = 10) -> None
     print(f"  [{first_ns}] {first_img} ({first_count} images)...", end="", flush=True)
     _, result = _import_one(first_ns, first_count, first_img)
     if result:
-        print(f" done")
+        print(" done")
         succeeded += 1
     else:
-        print(f" failed (skipped)")
+        print(" failed (skipped)")
 
     if len(candidates) > 1:
         remaining = candidates[1:]

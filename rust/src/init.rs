@@ -609,7 +609,7 @@ fn precreate_volume_mountpoints(config: &SandboxSpawnConfig) {
 // ======================================================================
 
 /// Mask a path: tmpfs (read-only) for directories, /dev/null bind for files.
-/// Matches runc's maskPaths() in libcontainer/rootfs_linux.go.
+/// Matches runc's `maskPaths()` in `libcontainer/rootfs_linux.go`.
 fn mask_path(path: &str) {
     if !Path::new(path).exists() {
         return;
