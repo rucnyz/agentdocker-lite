@@ -1,36 +1,21 @@
 # Nitrobox Benchmarks
 
-Track how nitrobox compares to Docker across Harbor's datasets, plus
-stand-alone micro-benchmarks and OSWorld timing.
+Track how nitrobox compares to Docker across real-world datasets, plus
+stand-alone micro-benchmarks.
 
 ## Harbor dataset compatibility
 
 Each dataset is run against Docker as baseline. A dataset is
 **supported** when every task that passes on Docker also passes on
-nitrobox (documented differences + flaky tasks are acceptable).
+nitrobox.
 
-| Dataset                      | Version | Tasks | Status         | Notes                                                                       |
-| ---------------------------- | ------- | ----- | -------------- | --------------------------------------------------------------------------- |
-| [terminal-bench](results/tb2.md)           | 2.0     | 89    | **86/89 match** | 4 both-fail (task bugs), 3 differ (1 compute-bound, 1 flaky, 1 both-timeout) |
-| [swebench-verified](results/swebench_verified.md) | —       | 500   | **match**      | 5 upstream-broken tasks fail on both                                        |
-| swebenchpro                  | —       | —     | Not tested     |                                                                             |
-| swesmith                     | —       | —     | Not tested     |                                                                             |
-| swtbench                     | —       | —     | Not tested     |                                                                             |
-| aider_polyglot               | —       | —     | Not tested     |                                                                             |
-| autocodebench                | —       | —     | Not tested     |                                                                             |
-| compilebench                 | —       | —     | Not tested     |                                                                             |
-| livecodebench                | —       | —     | Not tested     |                                                                             |
-| humanevalfix                 | —       | —     | Not tested     |                                                                             |
-| evoeval                      | —       | —     | Not tested     |                                                                             |
-| deveval                      | —       | —     | Not tested     |                                                                             |
-| mlgym-bench                  | —       | —     | Not tested     |                                                                             |
-| replicationbench             | —       | —     | Not tested     |                                                                             |
-| codepde                      | —       | —     | Not tested     |                                                                             |
-| aime                         | —       | —     | Not tested     |                                                                             |
-| gpqa-diamond                 | —       | —     | Not tested     |                                                                             |
-| usaco                        | —       | —     | Not tested     |                                                                             |
-| mmau                         | —       | —     | Not tested     |                                                                             |
-| sldbench                     | —       | —     | Not tested     |                                                                             |
+| Dataset                                           | Version | Tasks | Status     | Notes                                |
+|---------------------------------------------------|---------|-------|------------|--------------------------------------|
+| [terminal-bench](results/tb2.md)                  | 2.0     | 89    | **match**  | 4 both-fail (task bugs)              |
+| [swebench-verified](results/swebench_verified.md) | —       | 500   | **match**  | 5 upstream-broken tasks fail on both |
+| swebenchpro                                       | —       | —     | Not tested |                                      |
+| swesmith                                          | —       | —     | Not tested |                                      |
+| swtbench                                          | —       | —     | Not tested |                                      |
 
 ## Prerequisites
 
@@ -43,7 +28,7 @@ nitrobox setup
 sudo apt-get install -y uidmap
 
 # 3. Clone + install harbor
-git clone https://github.com/opensage-agent/harbor.git
+git clone https://github.com/rucnyz/harbor.git
 cd harbor && uv sync --all-extras --dev
 
 # 4. (optional) docker login to avoid Docker Hub rate limits
@@ -120,14 +105,11 @@ ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
     --envs docker,nitrobox
 ```
 
-## Other benchmarks
+## Micro Benchmark
 
 ```bash
-python examples/bench_swebench.py --help       # SWE-bench-style micro (Docker vs nitrobox)
-python examples/bench_osworld_e2e.py --help    # OSWorld end-to-end
-python examples/bench_osworld_reset.py --help  # OSWorld per-op reset timing
-python examples/bench_osworld_concurrent.py --help  # OSWorld concurrent sandboxes
-python examples/benchmark.py --help            # Full per-op comparison (all backends)
+
+python examples/micro_benchmark.py --help            # Full per-op comparison (all backends)
 ```
 
 ## Clean state
