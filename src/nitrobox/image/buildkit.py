@@ -1,9 +1,9 @@
 """BuildKit-based image building with in-memory concurrent cache.
 
 Manages a rootless buildkitd subprocess and provides build/layer APIs
-that replace buildah for Dockerfile builds. BuildKit's in-memory
-content-addressable cache enables true concurrent builds (~0.5s per
-cache-hit vs buildah's ~2.6s with storage.lock serialization).
+for Dockerfile builds. BuildKit's in-memory content-addressable cache
+enables true concurrent builds (~0.5s per cache-hit build, even with
+16+ concurrent builds).
 """
 
 from __future__ import annotations

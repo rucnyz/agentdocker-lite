@@ -86,10 +86,14 @@ src/nitrobox/
 ├── _registry.py        Pure-Python OCI registry client
 ├── checkpoint.py       CRIU checkpoint/restore
 ├── vm.py               QEMU/KVM VM manager + QGA guest execution
-├── cli.py              CLI commands (nitrobox ps/kill/cleanup)
+├── cli.py              CLI commands (nitrobox ps/kill/cleanup/setup/buildkit-stop)
+├── image/
+│   ├── buildkit.py     BuildKit daemon manager + build cache
+│   ├── layers.py       Layer resolution (BuildKit snapshots + containers/storage)
+│   └── store.py        OCI image config resolution
 ├── compose/            Docker Compose compatibility
 │   ├── _parse.py       YAML parsing + service definitions
 │   ├── _network.py     SharedNetwork + health checks
 │   └── _project.py     ComposeProject orchestrator
-└── _vendor/            Vendored binaries (pasta, criu, nbx-qmp)
+└── _vendor/            Vendored binaries (pasta, criu, buildkitd, nitrobox-core)
 ```

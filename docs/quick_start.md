@@ -435,6 +435,8 @@ nitrobox ps                  # list running sandboxes
 nitrobox kill <name>         # kill a sandbox and clean up
 nitrobox kill --all          # kill all sandboxes
 nitrobox cleanup             # remove stale sandbox directories
+nitrobox setup               # configure prerequisites + start buildkitd
+nitrobox buildkit-stop       # stop the managed buildkitd daemon
 nitrobox --dir /path ps      # use custom sandbox base directory
 ```
 

@@ -141,7 +141,7 @@ def _read_config_from_containers_storage(image_name: str) -> ImageConfig | None:
 
     Looks up the image in ``overlay-images/images.json``, then reads
     the config blob from the image's big-data directory.  This is the
-    primary source for buildah-built and podman-pulled images.
+    primary source for pulled images in containers/storage.
     """
     from nitrobox.image.layers import _containers_storage_root
 
@@ -184,7 +184,7 @@ def _read_config_from_containers_storage(image_name: str) -> ImageConfig | None:
             return None
 
         # Read config blob from big-data directory.
-        # The config digest equals the image ID for buildah-built images.
+        # The config digest equals the image ID in containers/storage.
         # File name is "=" + base64(digest_with_prefix).
         bd_dir = graph_root / f"{driver}-images" / img_id
         if not bd_dir.is_dir():
@@ -262,7 +262,7 @@ def get_image_config(image_name: str) -> dict | None:
         _image_store_populate(image_name, result)
         return result
 
-    # 2. containers/storage — primary source for pulled and buildah-built images
+    # 2. containers/storage — primary source for pulled images
     store_cfg = _read_config_from_containers_storage(image_name)
     if store_cfg is not None:
         _image_store_populate(image_name, store_cfg)

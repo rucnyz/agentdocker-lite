@@ -1,7 +1,8 @@
 """Layer management via containers/storage — zero-copy overlayfs layers.
 
-Images are stored in containers/storage (same as podman). Layers are
-accessed directly as overlay diff directories — no copying or extraction.
+Image builds use BuildKit (managed buildkitd daemon). Pulled images are
+stored in containers/storage. Layers are accessed directly as overlay
+diff directories — no copying or extraction.
 """
 
 from __future__ import annotations

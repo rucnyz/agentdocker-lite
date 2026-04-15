@@ -72,9 +72,9 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
 - **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts (e.g. database init). ComposeProject combines entrypoint+CMD as background process matching Docker semantics
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
-- **Zero-copy image layers**: Uses containers/storage (same as Podman) for direct layer access — no Docker daemon needed
+- **Zero-copy image layers**: Uses BuildKit for image builds (in-memory cache, true concurrent builds) and containers/storage for layer access — no Docker daemon needed
 - **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces, Docker-matching health check daemon (`interval`, `start_period`, `start_interval`, `retries`)
-- **CLI**: `nitrobox ps/kill/cleanup` for sandbox management
+- **CLI**: `nitrobox ps/kill/cleanup/setup/buildkit-stop` for sandbox and daemon management
 
 ## Requirements
 
@@ -317,9 +317,14 @@ See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compo
 ```
 Python API (Sandbox, ComposeProject)
   ├── Rust _core (pyo3)         — runtime: spawn, mount, cgroup, security, pidfd
-  └── Go nitrobox-core (binary) — images: pull, build, delete (containers/storage + buildah)
+  ├── Go nitrobox-core (binary) — images: pull, delete (containers/storage)
+  └── buildkitd (daemon)        — image builds: Dockerfile → layers (in-memory cache)
 
-Image pull order:
+Image build (Dockerfile):
+  buildkitd (managed daemon) → in-memory cache → overlayfs snapshots
+  Cache hit: ~0.5s (even 16 concurrent), cold: pulls from registry
+
+Image pull order (pre-built images):
   1. containers/storage local cache  → zero-copy (instant)
   2. Docker daemon local             → docker-daemon: transport (fast, no network)
   3. Registry remote                 → docker:// transport (network pull)
@@ -328,7 +333,7 @@ Sandbox "worker-0"
   +-- User namespace (rootless) or real root
   +-- PID / Mount / UTS / IPC / Net / Time namespaces
   +-- overlayfs rootfs
-  |     +-- lowerdir: image layers from containers/storage (zero-copy, read-only)
+  |     +-- lowerdir: image layers from BuildKit snapshots or containers/storage
   |     +-- upperdir: per-sandbox changes (cleared on reset)
   +-- Persistent shell (stdin/stdout pipes + signal fd for exit code)
   +-- seccomp-bpf + Landlock + capability drop
@@ -350,10 +355,10 @@ See [docs/quick_start.md](docs/quick_start.md) for detailed usage guide.
 
 ### Cold image builds are slower than Docker
 
-When a `docker-compose.yml` uses `build:` (e.g. SWE-bench tasks that `FROM` a prebuilt image), nitrobox builds via **buildah** (daemonless) instead of the Docker daemon. On a cold cache (first run), this is slower than Docker for two reasons:
+When a `docker-compose.yml` uses `build:` (e.g. SWE-bench tasks that `FROM` a prebuilt image), the first build pulls base images from the registry, which can take 30-120s depending on image size and network speed. This is comparable to Docker's cold pull time.
 
-1. **No shared daemon cache.** Docker's daemon deduplicates concurrent pulls — if 10 containers need the same base image, Docker pulls it once. Buildah is daemonless: each concurrent build independently resolves and pulls layers, competing for `containers/storage` file locks. The more concurrency, the worse the contention.
+Once images are cached in BuildKit's in-memory content store, subsequent builds are near-instant (~0.5s per build, even with 16+ concurrent builds). For benchmarks, use `--no-delete` to preserve the image cache across trials.
 
-2. **User namespace overhead.** Rootless buildah runs inside a user namespace, adding syscall overhead to every filesystem operation during the build (overlayfs in userns, `newuidmap`/`newgidmap` for ID remapping).
+### buildkitd daemon
 
-Once images are cached in `containers/storage`, subsequent runs skip the pull/build entirely — this is where nitrobox's **50x lifecycle speedup** kicks in. For benchmarks, use `--no-delete` to preserve the image cache across trials.
+nitrobox runs a managed `buildkitd` daemon (rootless, via rootlesskit) for image builds. The daemon starts automatically on first build and persists across Python sessions for cache warmth. Use `nitrobox buildkit-stop` to stop it manually. It auto-restarts on next build.
