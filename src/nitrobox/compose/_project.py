@@ -460,12 +460,9 @@ class ComposeProject:
     def _resolve_image_map(self) -> dict[str, str]:
         """Resolve image names and build missing images.
 
-        Uses BuildKit when available (fast concurrent cache), falls back
-        to buildah.
+        Uses BuildKit (managed buildkitd daemon) for fast concurrent builds
+        with in-memory content-addressable cache.
         """
-        from nitrobox.docker_api import get_client
-
-        get_client()
         project = self._project_name or self._compose_files[0].parent.name
 
         mapping: dict[str, str] = {}
@@ -476,17 +473,9 @@ class ComposeProject:
                 mapping[name] = f"{project}-{name}"
 
         # Build missing images for services with build: section.
-        from nitrobox.image.layers import _get_store_layers
         from nitrobox.image.buildkit import BuildKitManager, get_buildkit_layers
 
-        # Try BuildKit first (fast concurrent builds with in-memory cache)
-        use_buildkit = False
-        try:
-            bk = BuildKitManager.get()
-            if bk.available:
-                use_buildkit = True
-        except Exception:
-            pass
+        bk = BuildKitManager.get()
 
         for name, svc in self._defs.items():
             if not svc.build or name not in mapping:
@@ -494,9 +483,7 @@ class ComposeProject:
 
             image_name = mapping[name]
 
-            # Skip if already available (containers/storage or BuildKit cache)
-            if _get_store_layers(image_name) is not None:
-                continue
+            # Skip if already in BuildKit cache
             if get_buildkit_layers(image_name) is not None:
                 continue
 
@@ -504,74 +491,10 @@ class ComposeProject:
             context = str(build_cfg.get("context", "."))
             dockerfile = build_cfg.get("dockerfile", "Dockerfile")
 
-            if use_buildkit:
-                logger.info("Building image for service %s: %s (buildkit)", name, image_name)
-                bk.build(context, dockerfile, image_name)
-            else:
-                logger.info("Building image for service %s: %s (buildah)", name, image_name)
-                self._buildah_build(context, dockerfile, image_name)
+            logger.info("Building image for service %s: %s (buildkit)", name, image_name)
+            bk.build(context, dockerfile, image_name)
 
         return mapping
-
-    @staticmethod
-    def _buildah_build(context: str, dockerfile: str, tag: str) -> None:
-        """Build an image using buildah via nitrobox-core (no Docker daemon).
-
-        nitrobox-core image-build uses MaybeReexecUsingUserNamespace() internally
-        (same as podman) to handle userns, UID mapping, and overlay permissions.
-        No manual fork+unshare needed from Python.
-        """
-        import json as _json
-        import subprocess as _sp
-        from pathlib import Path
-
-        from nitrobox._gobin import gobin
-        bin_path = gobin()
-
-        from nitrobox.image.layers import _containers_storage_root
-        graph_root = _containers_storage_root()
-        if graph_root is None:
-            graph_root = Path.home() / ".local/share/containers/storage"
-            graph_root.mkdir(parents=True, exist_ok=True)
-        run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
-        run_root.mkdir(parents=True, exist_ok=True)
-
-        req = _json.dumps({
-            "dockerfile": dockerfile,
-            "context": context,
-            "tag": tag,
-            "graph_root": str(graph_root),
-            "run_root": str(run_root),
-        }).encode()
-
-        # Ensure buildah has Docker credentials + pasta in PATH.
-        env = os.environ.copy()
-        if "DOCKER_CONFIG" not in env:
-            docker_cfg = Path.home() / ".docker"
-            if (docker_cfg / "config.json").exists():
-                env["DOCKER_CONFIG"] = str(docker_cfg)
-        if "XDG_RUNTIME_DIR" not in env:
-            env["XDG_RUNTIME_DIR"] = f"/tmp/nitrobox-run-{os.getuid()}"
-            os.makedirs(env["XDG_RUNTIME_DIR"], exist_ok=True)
-        # Ensure vendored pasta is in PATH (needed by buildah for networking)
-        vendor_dir = str(Path(__file__).resolve().parent.parent / "_vendor")
-        if vendor_dir not in env.get("PATH", ""):
-            env["PATH"] = vendor_dir + ":" + env.get("PATH", "")
-        # Point buildah/containers at the vendored netavark (and any future
-        # helper binaries we ship).  containers/common prepends this dir to
-        # its HelperBinariesDir search list before falling back to the
-        # podman system paths, so this makes buildah-image builds work
-        # even when the host has no podman/netavark installed.
-        env.setdefault("CONTAINERS_HELPER_BINARY_DIR", vendor_dir)
-
-        result = _sp.run(
-            [bin_path, "image-build"],
-            input=req, capture_output=True, env=env,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"buildah build failed for {tag}: {result.stderr.decode()[:500]}"
-            )
 
     def _resolve_image(self, svc: _Service) -> str:
         """Resolve the Docker image name for a service."""

@@ -337,6 +337,21 @@ def cmd_setup(args: argparse.Namespace) -> None:
     else:
         print(f"WARN: kernel {kver} (< 5.11, rootless overlayfs may not work)")
 
+    # ---- BuildKit daemon (for concurrent image builds) ---------------------
+    try:
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        bk.ensure_running()
+        print("OK: buildkitd running")
+    except FileNotFoundError:
+        print(
+            "FAIL: buildkitd not found — required for image builds.\n"
+            "  The buildkitd binary should be bundled in the nitrobox package."
+        )
+        sys.exit(1)
+    except Exception as e:
+        print(f"WARN: buildkitd failed to start: {e}")
+
     # ---- Docker-dependent setup -------------------------------------------
     docker = shutil.which("docker")
     if not docker:
@@ -511,6 +526,8 @@ def main() -> None:
     kill_p.add_argument("name", nargs="?", help="sandbox name")
     kill_p.add_argument("--all", action="store_true", help="kill all sandboxes")
 
+    sub.add_parser("buildkit-stop", help="stop the managed buildkitd daemon")
+
     args = parser.parse_args()
 
     if args.command == "ps":
@@ -523,6 +540,10 @@ def main() -> None:
         cmd_setup(args)
     elif args.command == "warmup":
         cmd_warmup(args)
+    elif args.command == "buildkit-stop":
+        from nitrobox.image.buildkit import BuildKitManager
+        BuildKitManager.get().stop()
+        print("buildkitd stopped")
     else:
         parser.print_help()
 
