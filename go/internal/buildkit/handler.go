@@ -19,7 +19,6 @@ import (
 
 	"github.com/docker/cli/cli/config"
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/bklog"
@@ -196,6 +195,9 @@ func (s *Server) doBuild(req Request) Response {
 }
 
 func (s *Server) doPull(req Request) Response {
+	// Pull via Dockerfile frontend: "FROM {image}\nRUN true"
+	// The RUN instruction forces full layer extraction (unpacking lazy blobs).
+	// This is the same mechanism Docker uses — build triggers unpack.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -205,12 +207,23 @@ func (s *Server) doPull(req Request) Response {
 	}
 	defer c.Close()
 
-	def, err := llb.Image(req.ImageRef).Marshal(ctx)
+	// Create a temporary Dockerfile
+	tmpDir, err := os.MkdirTemp("", "nitrobox-pull-*")
 	if err != nil {
-		return Response{Error: fmt.Sprintf("marshal LLB: %v", err)}
+		return Response{Error: fmt.Sprintf("tmpdir: %v", err)}
 	}
+	defer os.RemoveAll(tmpDir)
+
+	dockerfilePath := filepath.Join(tmpDir, "Dockerfile")
+	os.WriteFile(dockerfilePath, []byte(fmt.Sprintf("FROM %s\nRUN true\n", req.ImageRef)), 0644)
 
 	solveOpt := client.SolveOpt{
+		Frontend:      "dockerfile.v0",
+		FrontendAttrs: map[string]string{"filename": "Dockerfile"},
+		LocalDirs: map[string]string{
+			"context":    tmpDir,
+			"dockerfile": tmpDir,
+		},
 		Exports: []client.ExportEntry{{
 			Type:  client.ExporterImage,
 			Attrs: map[string]string{"name": req.ImageRef, "push": "false"},
@@ -224,7 +237,7 @@ func (s *Server) doPull(req Request) Response {
 	eg, egCtx := errgroup.WithContext(ctx)
 	ch := make(chan *client.SolveStatus)
 	eg.Go(func() error {
-		resp, err := c.Solve(egCtx, def, solveOpt, ch)
+		resp, err := c.Solve(egCtx, nil, solveOpt, ch)
 		if err != nil {
 			return err
 		}

@@ -382,14 +382,16 @@ func (s *Server) GetLayerPaths(ctx context.Context, manifestDigest string) ([]st
 	}
 	recordID := sis[0].ID()
 
-	ref, err := s.cacheManager.Get(ctx, recordID, nil)
+	// Pass Unlazy session to force layer extraction (otherwise lazy blobs
+	// from pull-only operations won't be unpacked to the snapshotter).
+	ref, err := s.cacheManager.Get(ctx, recordID, nil, cache.Unlazy(session.NewGroup()))
 	if err != nil {
 		return nil, fmt.Errorf("cache get %s: %w", finalChainID[:20], err)
 	}
 	defer ref.Release(context.TODO())
 
 	// Mount read-only to get overlay mount info
-	mountable, err := ref.Mount(ctx, true, nil)
+	mountable, err := ref.Mount(ctx, true, session.NewGroup())
 	if err != nil {
 		return nil, fmt.Errorf("mount: %w", err)
 	}
