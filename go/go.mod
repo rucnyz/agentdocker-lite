@@ -6,6 +6,7 @@ require (
 	github.com/containerd/containerd/v2 v2.2.0
 	github.com/docker/cli v29.3.1+incompatible
 	github.com/moby/buildkit v0.26.3
+	github.com/rootless-containers/rootlesskit/v2 v2.3.6
 	github.com/spf13/cobra v1.10.2
 	go.podman.io/image/v5 v5.39.2
 	go.podman.io/storage v1.62.0

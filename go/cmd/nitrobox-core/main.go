@@ -153,12 +153,12 @@ func main() {
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "buildkit-serve",
-		Short: "Run embedded buildkitd in-process (blocks until killed)",
+		Short: "Run embedded buildkitd (manages rootless userns via rootlesskit)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var req struct {
 				RootDir string `json:"root_dir"`
 			}
-			// Read config from env (survives userns re-exec) or stdin
+			// Read config from env (survives re-exec) or stdin
 			if configEnv := os.Getenv("_NITROBOX_BUILDKIT_CONFIG"); configEnv != "" {
 				json.Unmarshal([]byte(configEnv), &req)
 			} else {
@@ -169,15 +169,35 @@ func main() {
 				os.Setenv("_NITROBOX_BUILDKIT_CONFIG", string(reqJSON))
 			}
 
-			// Save outer UID before userns re-exec (socket path needs it)
-			if os.Getenv("_NITROBOX_OUTER_UID") == "" {
-				os.Setenv("_NITROBOX_OUTER_UID", fmt.Sprintf("%d", os.Getuid()))
+			rootDir := req.RootDir
+			if rootDir == "" {
+				rootDir = nbxbuildkit.DefaultRootDir()
 			}
 
-			// Re-exec in user namespace (rootless buildkitd needs mapped root)
-			unshare.MaybeReexecUsingUserNamespace(false)
-			os.Unsetenv("_NITROBOX_BUILDKIT_CONFIG")
+			if nbxbuildkit.IsRootlessChild() {
+				// We're the rootlesskit child — complete userns setup
+				// and exec buildkit-serve-inner (the actual server)
+				return nbxbuildkit.RunChild([]string{"buildkit-serve-inner"})
+			}
 
+			// We're the original parent — create userns via rootlesskit
+			// and re-exec ourselves as child
+			return nbxbuildkit.RunParent(rootDir, []string{"buildkit-serve"})
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:    "buildkit-serve-inner",
+		Short:  "Internal: run buildkitd inside rootlesskit userns",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// We're inside the userns. Read config from env.
+			var req struct {
+				RootDir string `json:"root_dir"`
+			}
+			if configEnv := os.Getenv("_NITROBOX_BUILDKIT_CONFIG"); configEnv != "" {
+				json.Unmarshal([]byte(configEnv), &req)
+			}
 			rootDir := req.RootDir
 			if rootDir == "" {
 				rootDir = nbxbuildkit.DefaultRootDir()
@@ -189,15 +209,14 @@ func main() {
 				return err
 			}
 
-			// Write socket info to a well-known file (stdout is polluted
-			// by userns re-exec and BuildKit logs)
+			// Write socket info to well-known file
 			infoPath := filepath.Join(rootDir, "server.json")
 			infoJSON, _ := json.Marshal(map[string]string{
 				"socket_path": socketPath,
 				"root_dir":    rootDir,
 			})
 			os.WriteFile(infoPath, infoJSON, 0644)
-			fmt.Fprintf(os.Stderr, "buildkit-serve: info written to %s\n", infoPath)
+			fmt.Fprintf(os.Stderr, "buildkit-serve: ready at %s\n", socketPath)
 
 			// Block until signal
 			sigCh := make(chan os.Signal, 1)
