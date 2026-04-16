@@ -73,11 +73,20 @@ class BuildKitManager:
 
         req = json.dumps({"root_dir": self._root_dir}).encode()
 
+        # Force BuildKit's solver scratch dirs (os.MkdirTemp w/ empty dir) into
+        # our root_dir/tmp instead of /tmp. /tmp is often a small tmpfs or
+        # shared with other users; SWE-bench-class workloads (hundreds of
+        # builds, multi-GB images) will fill it within minutes.
+        tmp_dir = Path(self._root_dir) / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "TMPDIR": str(tmp_dir)}
+
         self._server_proc = subprocess.Popen(
             [bin_path, "buildkit-serve"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         self._server_proc.stdin.write(req + b"\n")
         self._server_proc.stdin.flush()
