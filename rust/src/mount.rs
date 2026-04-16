@@ -56,8 +56,7 @@ fn parse_kernel_version(ver: &str) -> (u32, u32) {
 fn overlay_supports_index() -> bool {
     *OVERLAY_INDEX_OFF.get_or_init(|| {
         std::fs::read_to_string("/sys/module/overlay/parameters/index")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
+            .is_ok_and(|s| !s.trim().is_empty())
     })
 }
 
@@ -66,13 +65,11 @@ fn overlay_supports_index() -> bool {
 /// issues (matching buildkit's `setRedirectDir` logic).
 fn overlay_redirect_dir_needs_off() -> bool {
     *OVERLAY_REDIRECT_DIR_OFF.get_or_init(|| {
-        std::fs::read_to_string("/sys/module/overlay/parameters/redirect_dir")
-            .map(|s| {
-                let v = s.trim();
-                // "Y" or "y" or "on" means enabled → we need to disable it
-                v.eq_ignore_ascii_case("y") || v.eq_ignore_ascii_case("on")
-            })
-            .unwrap_or(false)
+        std::fs::read_to_string("/sys/module/overlay/parameters/redirect_dir").is_ok_and(|s| {
+            let v = s.trim();
+            // "Y" or "y" or "on" means enabled → we need to disable it
+            v.eq_ignore_ascii_case("y") || v.eq_ignore_ascii_case("on")
+        })
     })
 }
 
@@ -190,7 +187,7 @@ fn mount_overlay_legacy(
         })
         .collect();
     let rel_spec = rel_lowers.join(":");
-    let mut rel_options = format!("lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}",);
+    let mut rel_options = format!("lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}");
     for opt in extra_opts {
         rel_options.push(',');
         rel_options.push_str(opt);

@@ -554,9 +554,7 @@ fn propagate_dns(rootfs: &str) {
     let sandbox_resolv = format!("{rootfs}/etc/resolv.conf");
     if Path::new("/etc/resolv.conf").exists() {
         let needs_copy = if Path::new(&sandbox_resolv).exists() {
-            std::fs::metadata(&sandbox_resolv)
-                .map(|m| m.len() == 0)
-                .unwrap_or(true)
+            std::fs::metadata(&sandbox_resolv).map_or(true, |m| m.len() == 0)
         } else {
             true
         };
