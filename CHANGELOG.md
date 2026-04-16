@@ -4,22 +4,46 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-16
+
+Major release: image backend replaced with embedded BuildKit. See
+`docs/blog.md` for the architectural writeup.
+
 ### Changed
-- **Health check daemon**: `_wait_healthy` now mirrors Docker Engine architecture — a background `_HealthMonitor` thread runs the check command at `interval` / `start_interval`, and `_wait_healthy` polls status every 500ms (matching Docker Compose). Previously, `start_period` caused a synchronous sleep and checks used the compose `interval` directly.
+- **Image backend**: `containers/storage` + `buildah` are replaced by an embedded BuildKit server linked into the nitrobox process via Go (with rootlesskit for unprivileged operation). Image build and pull now share a single snapshot store with the sandbox runtime — no external `dockerd`, no `containerd`, no extra daemon to manage.
+- **`cold-after-rmi` pull stays fast**: because the runtime uses BuildKit's snapshots directly, `rmi` no longer triggers layer re-unpack on the next pull (unlike Docker's BuildKit + containerd two-store split).
+- **`sandbox.delete()` speedup**: drop the two redundant userns permission/ownership walks on the delete path. `rmtree_mapped` already enters the user namespace as mapped root and handles mapped-UID files directly. Teardown drops from seconds to ~12 ms on workloads with large upper layers (e.g. SWE-bench testbeds after pytest).
+- **Persistent shell is plain bash**: image entrypoints (e.g. `/usr/bin/tini -s /run/entry.sh`) are no longer prepended to the sandbox shell. Entrypoints are for `run()`-style main processes; the persistent shell is the `docker exec` equivalent. Callers that need docker-run-style entrypoint behavior should use `sb.run_background(entrypoint_cmd)` explicitly.
+- **Health check daemon**: `_wait_healthy` now mirrors Docker Engine architecture — a background `_HealthMonitor` thread runs the check command at `interval` / `start_interval`, and `_wait_healthy` polls status every 500ms (matching Docker Compose).
 - **Health check defaults**: `interval` default changed from 10s to 30s, `timeout` from 5s to 30s, matching Docker Engine defaults. Added `start_interval` support (default 5s, Docker Engine 25+).
 - **build-only service image inference**: `_query_compose_config()` infers `{project}-{service}` image name for services with `build:` but no `image:`.
-- **`/etc/hosts` written from inside sandbox**: Uses `sb.run()` instead of host-side `write_file()` to ensure overlay mount namespace sees the change.
-- **Alpine shell compatibility**: `run()` and `run_background()` use detected shell instead of hardcoded `bash`.
+- **`/etc/hosts` written from inside sandbox**: Uses `sb.run()` instead of host-side `write_file()` to ensure the overlay mount namespace sees the change.
+- **Alpine shell compatibility**: `run()` and `run_background()` use the detected shell instead of hardcoded `bash`.
 
 ### Added
-- **`extra_hosts`**: Compose `extra_hosts` entries are now written to `/etc/hosts` inside the sandbox (also survives `reset()`).
-- **`sysctls`**: Compose `sysctls` are applied by writing to `/proc/sys/` inside the sandbox. Failures are logged but non-fatal (writability depends on kernel namespace support).
-- **`depends_on` condition**: `_parse_depends_on` now preserves `condition` (`service_started` / `service_healthy`). `up()` only blocks on `service_healthy` dependencies before starting dependents; `service_started` just ensures ordering.
+- **`PR_SET_PDEATHSIG` chain**: Rust init sets PDEATHSIG=SIGKILL on both the intermediate `unshare`ed process and the final `/bin/bash`. When the nitrobox parent dies abruptly (SIGKILL / crash), the kernel tears the whole sandbox down — no more orphan `bash --norc --noprofile` processes accumulating across crashed runs.
+- **`release_layer_locks(fds)`**: companion to `acquire_layer_locks`; previously missing, which raised `ImportError` on sandbox cleanup.
+- **`XDG_DATA_HOME` override**: BuildKit root respects `$XDG_DATA_HOME` (falls back to `~/.local/share/nitrobox/buildkit`). One env var relocates the entire cache to a larger disk — matches podman/helm/cargo convention.
+- **BuildKit `TMPDIR` routed to `<root>/tmp`**: the solver's scratch dirs (`os.MkdirTemp("", "buildkit-mount")`) land next to the cache instead of in `/tmp`. Avoids filling a small/tmpfs `/tmp` on SWE-bench-class workloads.
+- **`nitrobox buildkit-stop`** CLI command to stop the managed buildkitd daemon.
+- **`extra_hosts`**: Compose `extra_hosts` entries are written to `/etc/hosts` inside the sandbox (also survives `reset()`).
+- **`sysctls`**: Compose `sysctls` are applied by writing to `/proc/sys/` inside the sandbox. Failures are logged but non-fatal.
+- **`depends_on` condition**: `_parse_depends_on` preserves `condition` (`service_started` / `service_healthy`).
 - **Parallel health check waiting**: After all services start, `_wait_all_healthy` polls all monitors simultaneously (equivalent to `docker compose up --wait`).
-- **`init`, `user`, `pid`, `ipc`**: No longer error — parsed and safely ignored (persistent shell handles zombie reaping; rootless mode makes `user` less meaningful; `pid`/`ipc` need Rust core changes for real support).
+- **`init`, `user`, `pid`, `ipc`**: Compose fields no longer error — parsed and safely ignored.
 
 ### Fixed
 - **Health check timeout**: Uses `default_timeout` as overall deadline instead of compose `retries` count.
+- **`release_layer_locks` missing**: the delete() path imported a function that didn't exist; now implemented.
+
+### CI / Infra
+- Branch protection enabled on `main`: `Tests`, `Docs`, `Rust (clippy + audit + fmt)`, `Lint` are required for merge (strict mode).
+- Docs workflow now also runs on pull requests (deploy remains gated on push).
+- Repo-level auto-merge enabled.
+
+### Removed
+- `buildah` / `containers/storage` dependencies and all associated Go code.
+- Old image store helpers (`_get_store_layers`, `Sandbox._get_image_digest`, `get_buildkit_layers`) and their tests.
 
 ## [0.0.5] - 2026-03-24
 
