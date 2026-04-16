@@ -1113,6 +1113,15 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             // PID namespace) so that CRIU can dump it without the
             // "session leader outside pid namespace" error.
 
+            // PR_SET_PDEATHSIG on Child A: kernel SIGKILLs us when the
+            // nitrobox/Python parent dies abruptly. This in turn triggers the
+            // PDEATHSIG we set on Child B (the bash) just before execve, since
+            // Child B's parent is Child A. Net effect: parent SIGKILL chains
+            // down to bash, releasing the persistent shell + all its mounts.
+            unsafe {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+            }
+
             // Redirect stdin/stdout via nix typed API (borrow raw fds)
             let _ = unistd::dup2_stdin(borrow(stdin_r));
             if config.tty {
@@ -1508,6 +1517,14 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         borrow(signal_w),
         nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
     );
+
+    // PR_SET_PDEATHSIG: kernel auto-SIGKILLs this shell when its parent dies
+    // abruptly (SIGKILL/segfault/etc.) — preventing orphan bash processes that
+    // outlive the nitrobox parent. PDEATHSIG persists across execve unless the
+    // exec target is setuid/setgid (bash isn't), so this survives into bash.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+    }
 
     // Exec via nix — on success this never returns; on failure we report and exit.
     let e = unistd::execve(&exec_args[0], &exec_args, &env_vec).unwrap_err();

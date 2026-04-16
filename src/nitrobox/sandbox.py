@@ -604,8 +604,13 @@ class Sandbox:
             except Exception:
                 pass
 
-        self._fixup_userns_permissions()
-        self._fixup_userns_ownership()
+        # NOTE: deliberately skipping _fixup_userns_permissions and
+        # _fixup_userns_ownership on the delete path. rmtree_mapped (below)
+        # already enters the user namespace as mapped root and runs
+        # `rm -rf` from there, so files owned by mapped UIDs delete fine
+        # without the prior chmod/chown walks. Removing the two extra
+        # tree walks cuts teardown by ~50–70% on workloads with large
+        # upper layers (e.g. SWE-bench testbeds after pytest).
         self._persistent_shell.kill()
 
         self._unmount_all()
