@@ -215,8 +215,16 @@ fn unpack<R: io::Read>(reader: R, dest: &str, max_id: u32) -> io::Result<()> {
         // this, lchown returns EINVAL for unmapped UIDs (e.g. UID 197609
         // from Windows-built tarballs in SWE-bench images).
         // Ref: containers/storage pkg/idtools/idtools.go, PR #1220.
-        let uid = if raw_uid > max_id { OVERFLOW_ID } else { raw_uid };
-        let gid = if raw_gid > max_id { OVERFLOW_ID } else { raw_gid };
+        let uid = if raw_uid > max_id {
+            OVERFLOW_ID
+        } else {
+            raw_uid
+        };
+        let gid = if raw_gid > max_id {
+            OVERFLOW_ID
+        } else {
+            raw_gid
+        };
         let mode = entry.header().mode()?;
         let mtime = entry.header().mtime()? as i64;
 

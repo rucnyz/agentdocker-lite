@@ -271,15 +271,7 @@ fn mount_proc(
     if let Some(cg) = cgroup_path {
         let cg_target = format!("{rootfs}/sys/fs/cgroup");
         let _ = std::fs::create_dir_all(&cg_target);
-        if mnt(
-            Some(cg),
-            &cg_target,
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None,
-        )
-        .is_ok()
-        {
+        if mnt(Some(cg), &cg_target, None::<&str>, MsFlags::MS_BIND, None).is_ok() {
             let _ = mnt(
                 None::<&str>,
                 &cg_target,
@@ -659,7 +651,9 @@ fn apply_security(config: &SandboxSpawnConfig) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.starts_with("cpu") && name[3..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                if name.starts_with("cpu")
+                    && name[3..].chars().next().is_some_and(|c| c.is_ascii_digit())
+                {
                     let p = format!("/sys/devices/system/cpu/{name}/thermal_throttle");
                     mask_path(&p);
                 }
@@ -1117,7 +1111,13 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             // Child B's parent is Child A. Net effect: parent SIGKILL chains
             // down to bash, releasing the persistent shell + all its mounts.
             unsafe {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+                libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGKILL as libc::c_ulong,
+                    0,
+                    0,
+                    0,
+                );
             }
 
             // Redirect stdin/stdout via nix typed API (borrow raw fds)
@@ -1521,7 +1521,13 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
     // outlive the nitrobox parent. PDEATHSIG persists across execve unless the
     // exec target is setuid/setgid (bash isn't), so this survives into bash.
     unsafe {
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0);
+        libc::prctl(
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGKILL as libc::c_ulong,
+            0,
+            0,
+            0,
+        );
     }
 
     // Exec via nix — on success this never returns; on failure we report and exit.

@@ -10,8 +10,8 @@ use std::env;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 fn die(msg: &str) -> ! {
@@ -31,12 +31,14 @@ fn find_criu() -> PathBuf {
 }
 
 fn verify_ownership(path: &Path, caller_uid: u32) {
-    let meta = fs::metadata(path)
-        .unwrap_or_else(|e| die(&format!("can't stat {}: {e}", path.display())));
+    let meta =
+        fs::metadata(path).unwrap_or_else(|e| die(&format!("can't stat {}: {e}", path.display())));
     if meta.uid() != caller_uid {
         die(&format!(
             "permission denied: {} owned by uid {}, caller is uid {}",
-            path.display(), meta.uid(), caller_uid
+            path.display(),
+            meta.uid(),
+            caller_uid
         ));
     }
 }
@@ -44,13 +46,22 @@ fn verify_ownership(path: &Path, caller_uid: u32) {
 fn enter_ns(pid: u32, ns_type: &str, clone_flag: i32) {
     let path = format!("/proc/{pid}/ns/{ns_type}");
     let fd = unsafe {
-        libc::open(CString::new(path.as_str()).unwrap().as_ptr(), libc::O_RDONLY)
+        libc::open(
+            CString::new(path.as_str()).unwrap().as_ptr(),
+            libc::O_RDONLY,
+        )
     };
     if fd < 0 {
-        die(&format!("can't open {path}: {}", std::io::Error::last_os_error()));
+        die(&format!(
+            "can't open {path}: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     if unsafe { libc::setns(fd, clone_flag) } != 0 {
-        die(&format!("setns {ns_type} failed: {}", std::io::Error::last_os_error()));
+        die(&format!(
+            "setns {ns_type} failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     unsafe { libc::close(fd) };
 }
@@ -112,12 +123,17 @@ fn main() {
 
     // ---- umount subcommand ------------------------------------------------
     if subcommand == "umount" {
-        let target = criu_args.first().unwrap_or_else(|| die("umount: PATH required"));
+        let target = criu_args
+            .first()
+            .unwrap_or_else(|| die("umount: PATH required"));
         verify_ownership(Path::new(target), caller_uid);
         unsafe {
             let dst = CString::new(target.as_str()).unwrap();
             if libc::umount2(dst.as_ptr(), libc::MNT_DETACH) != 0 {
-                die(&format!("umount {target}: {}", std::io::Error::last_os_error()));
+                die(&format!(
+                    "umount {target}: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
         }
         exit(0);
@@ -132,10 +148,22 @@ fn main() {
         let mut j = 0;
         while j < criu_args.len() {
             match criu_args[j].as_str() {
-                "--lowerdir" if j + 1 < criu_args.len() => { lowerdir = Some(&criu_args[j+1]); j += 2; }
-                "--upper" if j + 1 < criu_args.len() => { upper = Some(&criu_args[j+1]); j += 2; }
-                "--work" if j + 1 < criu_args.len() => { work = Some(&criu_args[j+1]); j += 2; }
-                "--target" if j + 1 < criu_args.len() => { target = Some(&criu_args[j+1]); j += 2; }
+                "--lowerdir" if j + 1 < criu_args.len() => {
+                    lowerdir = Some(&criu_args[j + 1]);
+                    j += 2;
+                }
+                "--upper" if j + 1 < criu_args.len() => {
+                    upper = Some(&criu_args[j + 1]);
+                    j += 2;
+                }
+                "--work" if j + 1 < criu_args.len() => {
+                    work = Some(&criu_args[j + 1]);
+                    j += 2;
+                }
+                "--target" if j + 1 < criu_args.len() => {
+                    target = Some(&criu_args[j + 1]);
+                    j += 2;
+                }
                 _ => j += 1,
             }
         }
@@ -152,9 +180,18 @@ fn main() {
             let dst = CString::new(t).unwrap();
             let fstype = CString::new("overlay").unwrap();
             let data = CString::new(opts.as_str()).unwrap();
-            if libc::mount(src.as_ptr(), dst.as_ptr(), fstype.as_ptr(), 0,
-                           data.as_ptr() as *const _) != 0 {
-                die(&format!("mount overlay: {}", std::io::Error::last_os_error()));
+            if libc::mount(
+                src.as_ptr(),
+                dst.as_ptr(),
+                fstype.as_ptr(),
+                0,
+                data.as_ptr() as *const _,
+            ) != 0
+            {
+                die(&format!(
+                    "mount overlay: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
         }
         exit(0);
@@ -168,13 +205,16 @@ fn main() {
     while i < criu_args.len() {
         match criu_args[i].as_str() {
             "--ns-pid" if i + 1 < criu_args.len() => {
-                ns_pid = criu_args[i + 1].parse().ok(); i += 2;
+                ns_pid = criu_args[i + 1].parse().ok();
+                i += 2;
             }
             "--images-dir" if i + 1 < criu_args.len() => {
-                images_dir = Some(criu_args[i + 1].clone()); i += 2;
+                images_dir = Some(criu_args[i + 1].clone());
+                i += 2;
             }
             "--root" if i + 1 < criu_args.len() => {
-                root_path = Some(criu_args[i + 1].clone()); i += 2;
+                root_path = Some(criu_args[i + 1].clone());
+                i += 2;
             }
             _ => i += 1,
         }
@@ -184,12 +224,16 @@ fn main() {
     verify_ownership(&PathBuf::from(format!("/proc/{ns_pid}")), caller_uid);
 
     // Resolve paths to absolute before entering namespace
-    let images_abs = images_dir.as_ref().map(|d| {
-        fs::canonicalize(d).unwrap_or_else(|_| PathBuf::from(d))
-    });
+    let images_abs = images_dir
+        .as_ref()
+        .map(|d| fs::canonicalize(d).unwrap_or_else(|_| PathBuf::from(d)));
     if let Some(ref abs) = images_abs {
         verify_ownership(
-            if abs.exists() { abs } else { abs.parent().unwrap_or(abs) },
+            if abs.exists() {
+                abs
+            } else {
+                abs.parent().unwrap_or(abs)
+            },
             caller_uid,
         );
     }
@@ -205,8 +249,14 @@ fn main() {
             unsafe {
                 let src = CString::new(root.as_str()).unwrap();
                 let dst = CString::new(cr.as_str()).unwrap();
-                if libc::mount(src.as_ptr(), dst.as_ptr(), std::ptr::null(),
-                               libc::MS_BIND | libc::MS_REC, std::ptr::null()) != 0 {
+                if libc::mount(
+                    src.as_ptr(),
+                    dst.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REC,
+                    std::ptr::null(),
+                ) != 0
+                {
                     die(&format!("bind mount: {}", std::io::Error::last_os_error()));
                 }
             }
@@ -224,8 +274,11 @@ fn main() {
         libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC)
     };
     if criu_fd < 0 {
-        die(&format!("can't open CRIU binary {}: {}", criu.display(),
-                     std::io::Error::last_os_error()));
+        die(&format!(
+            "can't open CRIU binary {}: {}",
+            criu.display(),
+            std::io::Error::last_os_error()
+        ));
     }
     unsafe {
         let flags = libc::fcntl(criu_fd, libc::F_GETFD);
@@ -241,8 +294,11 @@ fn main() {
                 libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
             };
             if dir_fd < 0 {
-                die(&format!("can't open images dir {}: {}", abs.display(),
-                             std::io::Error::last_os_error()));
+                die(&format!(
+                    "can't open images dir {}: {}",
+                    abs.display(),
+                    std::io::Error::last_os_error()
+                ));
             }
             images_host_fd = Some(dir_fd);
 
@@ -255,10 +311,19 @@ fn main() {
             let fstype = CString::new("tmpfs").unwrap();
             let opts = CString::new("size=1G").unwrap();
             if unsafe {
-                libc::mount(src.as_ptr(), dst.as_ptr(), fstype.as_ptr(),
-                            0, opts.as_ptr() as *const _)
-            } != 0 {
-                die(&format!("mount tmpfs for images: {}", std::io::Error::last_os_error()));
+                libc::mount(
+                    src.as_ptr(),
+                    dst.as_ptr(),
+                    fstype.as_ptr(),
+                    0,
+                    opts.as_ptr() as *const _,
+                )
+            } != 0
+            {
+                die(&format!(
+                    "mount tmpfs for images: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
             Some(target.to_string())
         } else {
@@ -315,20 +380,30 @@ fn main() {
             continue;
         }
         match arg.as_str() {
-            "--ns-pid" => { skip_next = true; skip_key = "--ns-pid"; }
-            "--root" => { skip_next = true; skip_key = "--root"; }
+            "--ns-pid" => {
+                skip_next = true;
+                skip_key = "--ns-pid";
+            }
+            "--root" => {
+                skip_next = true;
+                skip_key = "--root";
+            }
             "--images-dir" => {
                 cmd.arg(arg);
-                skip_next = true; skip_key = "--images-dir";
+                skip_next = true;
+                skip_key = "--images-dir";
             }
-            _ => { cmd.arg(arg); }
+            _ => {
+                cmd.arg(arg);
+            }
         }
     }
 
     cmd.arg("--log-file").arg(format!("{subcommand}.log"));
     cmd.arg("-v4");
 
-    let status = cmd.status()
+    let status = cmd
+        .status()
         .unwrap_or_else(|e| die(&format!("exec criu failed: {e}")));
 
     if let Some(ref mnt) = images_mount {
@@ -347,7 +422,10 @@ fn main() {
                 }
             }
             if saved >= 0 {
-                unsafe { libc::fchdir(saved); libc::close(saved); }
+                unsafe {
+                    libc::fchdir(saved);
+                    libc::close(saved);
+                }
             }
             unsafe { libc::close(host_fd) };
         }
