@@ -52,13 +52,15 @@ jobs:
       # Build wheel via maturin. NITROBOX_SKIP_GO_BUILD=1 tells build.rs not
       # to re-run `go build` inside the manylinux container (which doesn't
       # have Go anyway) — we already placed the prebuilt binary above.
+      # maturin-action only forwards MATURIN_*-prefixed env vars to the
+      # container by default, so the Go-skip flag must be passed via
+      # docker-options instead.
       - uses: PyO3/maturin-action@v1
-        env:
-          NITROBOX_SKIP_GO_BUILD: "1"
         with:
           target: ${{ matrix.target }}
           args: --release --out dist -i python3.12 python3.13
           manylinux: auto
+          docker-options: --env NITROBOX_SKIP_GO_BUILD=1
 
       - uses: actions/upload-artifact@v7
         with:
