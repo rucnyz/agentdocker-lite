@@ -64,7 +64,7 @@ jobs:
         with:
           pattern: coverage-*
           merge-multiple: true
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v6
         with:
           files: coverage-rootless.xml,coverage-root.xml
           fail_ci_if_error: false
