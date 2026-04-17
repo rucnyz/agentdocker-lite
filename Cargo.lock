@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "nitrobox-core"
-version = "0.0.6"
+version = "0.1.0"
 dependencies = [
  "container_image_dist_ref",
  "env_logger",
