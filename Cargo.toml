@@ -22,7 +22,7 @@ path = "rust/src/bin/checkpoint_helper.rs"
 
 [dependencies]
 pyo3 = "0.28"
-pyo3-stub-gen = "0.21"
+pyo3-stub-gen = "0.22"
 nix = { version = "0.31", features = [
     "sched",     # unshare, setns
     "mount",     # mount, umount2
