@@ -20,7 +20,7 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -71,7 +71,7 @@ jobs:
     name: Build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
@@ -95,7 +95,7 @@ jobs:
           path: dist/
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: gh release create "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
